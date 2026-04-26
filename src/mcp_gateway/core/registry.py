@@ -13,6 +13,8 @@ class ToolRegistry:
         self.config = self._load_yaml(config_path)
         # 最終的にAIに提示し、ルーティングに使用するツールの辞書
         self.active_tools: Dict[str, Dict[str, Any]] = {}
+        # 現在登録されている各バックエンドの生ツールリストを保持する状態マップ
+        self._backend_tools_map: Dict[str, List[Dict[str, Any]]] = {}
 
     def _load_yaml(self, path: str) -> Dict[str, Any]:
         """YAMLファイルを読み込む。重複するキーはPyYAMLの仕様で自動的に後勝ちになる"""
@@ -22,6 +24,19 @@ class ToolRegistry:
         except Exception as e:
             logger.error(f"Failed to load config from {path}: {e}")
             return {}
+
+    def add_backend_server(self, server_name: str, raw_tools: List[Dict[str, Any]]):
+        """(Control Plane用) 動的にサーバーを追加・更新し、ルーティングを再計算する"""
+        self._backend_tools_map[server_name] = raw_tools
+        self.merge_and_resolve_tools(self._backend_tools_map)
+        logger.info(f"Added/Updated server '{server_name}'. Total active tools: {len(self.active_tools)}")
+
+    def remove_backend_server(self, server_name: str):
+        """(Control Plane用) 動的にサーバーを削除し、ルーティングを再計算する"""
+        if server_name in self._backend_tools_map:
+            del self._backend_tools_map[server_name]
+            self.merge_and_resolve_tools(self._backend_tools_map)
+            logger.info(f"Removed server '{server_name}'. Total active tools: {len(self.active_tools)}")
 
     def merge_and_resolve_tools(self, backend_tools_map: Dict[str, List[Dict[str, Any]]]):
         """
