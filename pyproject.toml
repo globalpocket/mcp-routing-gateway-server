@@ -1,0 +1,18 @@
+[project]
+name = "mcp-gateway-server"
+version = "0.1.0"
+description = "A stateless MCP gateway that acts as a secure facade for AI agents."
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "pydantic>=2.0.0",   # 仮想ツールのスキーマ定義と検証
+    "fastapi>=0.100.0",  # Control Plane (管理用REST API)
+    "uvicorn>=0.23.0",   # FastAPIのサーバー起動
+    "httpx>=0.25.0",     # Data Plane (バックエンドへの非同期HTTPリクエスト)
+    "httpx-sse>=0.3.0",  # バックエンドからのSSEストリーム受信
+    "pyyaml>=6.0",       # gateway_config.yaml の読み込み
+]
+
+[project.scripts]
+# CLIから起動できるようにするためのエントリーポイント
+mcp-gateway = "mcp_gateway.cli:main"

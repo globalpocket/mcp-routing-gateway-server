@@ -1,0 +1,19 @@
+# gateway_config.yaml
+version: "1.0"
+
+# 1. バックエンドツールの「仮想ツール」への置き換え定義 (Facade)
+# ここで定義されたツールは、バックエンドのツール一覧からインターセプトされ、
+# 安全な形でAIに提示されます。
+virtual_tools:
+  run_command:
+    description: "安全なサンドボックス内でシェルコマンドを実行します。"
+    target_route: "/mcp/sandbox"
+    # インフラ固有のオプション (Gatewayがバックエンドに流す際に処理)
+    translation_options:
+      inject_session_id: true
+
+# 2. 明示的なルーティング (優先度：最高)
+# 複数のサーバーが同じツールを持っている場合のルーティング先を固定します。
+explicit_routing:
+  read_file: "serverA" # read_file は常に serverA のものを使用
+  search_github: "serverB" # search_github は常に serverB のものを使用
