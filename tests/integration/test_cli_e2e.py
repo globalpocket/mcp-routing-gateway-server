@@ -78,11 +78,21 @@ def test_cli_initialization_flow():
     """src/mcp_gateway/cli.py の起動初期化ロジックのカバレッジを稼ぐ"""
     from mcp_gateway.cli import main
     
-    # asyncio.runをモックして無限ループを回避しつつ、初期化コードを実行
+    # asyncio.runをモックして製品の無限ループ起動を回避
     with patch("argparse.ArgumentParser.parse_args") as mock_args:
         mock_args.return_value = MagicMock(config="gateway_config.yaml")
-        with patch("asyncio.run") as mock_run:
-            # mainを実行。初期化処理が走り、最後にasyncio.run(main_loop())が呼ばれる
+        
+        # 修正ポイント: 
+        # asyncio.runに渡されたコルーチン(main_loop)を明示的に閉じる side_effect を設定。
+        # これにより、RuntimeWarning（未待機警告）を物理的に解消しつつ、
+        # 起動シーケンスが最後まで呼ばれたことを検証できます。
+        def close_coro_side_effect(coro):
+            coro.close()
+            return None
+
+        with patch("asyncio.run", side_effect=close_coro_side_effect) as mock_run:
+            # main()を実行。初期化処理が走り、最後にasyncio.run(main_loop())が呼ばれる
             main()
-            # asyncio.runが呼ばれたことを確認
+            
+            # asyncio.runが呼ばれたこと（＝起動準備が完了したこと）を確認
             mock_run.assert_called_once()
