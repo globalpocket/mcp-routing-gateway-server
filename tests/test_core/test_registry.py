@@ -10,8 +10,7 @@ TEST_CONFIG = {
     "virtual_tools": {
         "run_command": {
             "description": "Safe sandbox command execution",
-            "target_route": "/mcp/sandbox",
-            "translation_options": {"inject_session_id": True}
+            "target_route": "/mcp/sandbox"
         }
     },
     "explicit_routing": {
@@ -77,7 +76,6 @@ def test_virtual_tool_replacement(registry):
     assert routing_info is not None
     # ルーティング先が仮想ツールで定義した /mcp/sandbox になっているか
     assert routing_info["target_route"] == "/mcp/sandbox"
-    assert routing_info["translation_options"] == {"inject_session_id": True}
 
     llm_tools = registry.get_tools_for_llm()
     run_cmd = next(t for t in llm_tools if t["name"] == "run_command")

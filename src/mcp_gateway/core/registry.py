@@ -69,6 +69,7 @@ class ToolRegistry:
         proxy_tool = raw_tool.copy()
         proxy_tool["name"] = tool_name
         proxy_tool["_target_route"] = f"/mcp/{target_server}"
+        proxy_tool["_backend_tool_name"] = raw_tool["name"]
         return proxy_tool
 
     def _get_raw_tool(self, backend_tools_map: Dict[str, List[Dict[str, Any]]], server_name: str, tool_name: str) -> Optional[Dict[str, Any]]:
@@ -90,8 +91,7 @@ class ToolRegistry:
                 "name": v_name,
                 "description": v_config.get("description", ""),
                 "inputSchema": v_config.get("inputSchema", {"type": "object", "properties": {}}),
-                "_target_route": v_config.get("target_route"),
-                "_translation_options": v_config.get("translation_options", {})
+                "_target_route": v_config.get("target_route")
             }
             final_tools[v_name] = virtual_tool
             logger.info(f"Registered virtual tool: {v_name}")
@@ -115,5 +115,5 @@ class ToolRegistry:
             return None
         return {
             "target_route": tool.get("_target_route"),
-            "translation_options": tool.get("_translation_options", {})
+            "backend_tool_name": tool.get("_backend_tool_name", tool_name)
         }
