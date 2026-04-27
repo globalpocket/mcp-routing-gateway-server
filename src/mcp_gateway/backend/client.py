@@ -98,10 +98,22 @@ class BackendClient:
 
     async def fetch_tools(self, target_route: str) -> List[Dict[str, Any]]:
         """
-        (Control Plane用) バックエンドから tools/list を取得する。
+        (Control Plane用) バックエンドと初期化ハンドシェイクを行い、tools/list を取得する。
         """
         sse_url = f"{self.base_url}{target_route}/sse"
-        req = {"jsonrpc": "2.0", "id": "internal-fetch", "method": "tools/list", "params": {}}
+        
+        init_req = {
+            "jsonrpc": "2.0",
+            "id": "internal-init",
+            "method": "initialize",
+            "params": {
+                "protocolVersion": "2024-11-05",
+                "capabilities": {},
+                "clientInfo": {"name": "mcp-routing-gateway", "version": "0.1.0"}
+            }
+        }
+        init_notif = {"jsonrpc": "2.0", "method": "notifications/initialized"}
+        tools_req = {"jsonrpc": "2.0", "id": "internal-fetch", "method": "tools/list", "params": {}}
         
         async with httpx.AsyncClient(timeout=10.0) as temp_client:
             try:
@@ -115,8 +127,24 @@ class BackendClient:
                     if not post_endpoint: return []
                         
                     post_url = f"{self.base_url}{post_endpoint}" if post_endpoint.startswith("/") else post_endpoint
-                    await temp_client.post(post_url, json=req)
                     
+                    # 1. Initialize Handshake
+                    await temp_client.post(post_url, json=init_req)
+                    initialized = False
+                    async for event in event_source.aiter_sse():
+                        if event.event == "message":
+                            res = json.loads(event.data)
+                            if res.get("id") == "internal-init":
+                                initialized = True
+                                # 2. Send initialized notification
+                                await temp_client.post(post_url, json=init_notif)
+                                break
+                                
+                    if not initialized:
+                        return []
+                    
+                    # 3. Fetch tools
+                    await temp_client.post(post_url, json=tools_req)
                     async for event in event_source.aiter_sse():
                         if event.event == "message":
                             res = json.loads(event.data)
