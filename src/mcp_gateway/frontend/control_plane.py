@@ -33,6 +33,8 @@ def create_admin_api(registry: ToolRegistry, backend_client: BackendClient) -> F
     async def remove_route(server_name: str):
         """指定されたサーバーをRegistryから削除する"""
         registry.remove_backend_server(server_name)
+        # バックエンドへの接続タスクもクリーンアップする (リソースリーク対策)
+        backend_client.disconnect(f"/mcp/{server_name}")
         return {"status": "success", "message": f"Server '{server_name}' removed"}
 
     return app

@@ -125,3 +125,15 @@ class BackendClient:
             except Exception as e:
                 logger.error(f"Failed to fetch tools from {target_route}: {e}")
         return []
+
+    def disconnect(self, target_route: str):
+        """
+        (Control Plane用) 特定のバックエンドに対するSSE接続タスクをキャンセルし、
+        リソースリークを防ぐためのクリーンアップを行う。
+        """
+        if target_route in self._streams:
+            task = self._streams[target_route].get("task")
+            if task and not task.done():
+                task.cancel()
+            del self._streams[target_route]
+            logger.info(f"Disconnected SSE stream and cleaned up resources for {target_route}")

@@ -62,3 +62,17 @@ async def test_client_sanitize_invalid_json(caplog):
     assert "Invalid message format" in caplog.text
     assert "invalid{json" in caplog.text
     assert "Missing or invalid 'jsonrpc'" in caplog.text
+
+@pytest.mark.anyio
+async def test_client_disconnect():
+    """disconnect メソッドがタスクを正しくキャンセルし、リソースを解放することを検証"""
+    client = BackendClient()
+    mock_task = MagicMock()
+    mock_task.done.return_value = False
+    
+    client._streams["/mcp/test"] = {"task": mock_task}
+    
+    client.disconnect("/mcp/test")
+    
+    mock_task.cancel.assert_called_once()
+    assert "/mcp/test" not in client._streams
