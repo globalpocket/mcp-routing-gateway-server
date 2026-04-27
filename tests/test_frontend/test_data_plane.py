@@ -53,3 +53,30 @@ async def test_forward_to_backend_preserves_payload():
     assert forwarded_req["params"]["name"] == "read_file", "Tool name must be translated to backend name"
     assert forwarded_req["params"]["arguments"] == {"path": "/etc/passwd"}, "Arguments must be preserved"
     assert forwarded_req["params"]["extra_field"] == "should_be_preserved", "Unknown fields must be preserved"
+
+@pytest.mark.anyio
+async def test_forward_cancellation_to_backend():
+    """AIからの実行キャンセル通知が、正しいバックエンドへ転送されることを検証"""
+    mock_registry = MagicMock()
+    mock_registry.get_tool_routing_info.return_value = {
+        "target_route": "/mcp/serverB",
+        "backend_tool_name": "long_task"
+    }
+    mock_backend_client = AsyncMock()
+    server = DataPlaneServer(registry=mock_registry, backend_client=mock_backend_client)
+
+    # 1. ツール呼び出し (GatewayがIDとルートの対応を記憶する)
+    call_req = {"jsonrpc": "2.0", "id": "cancel-123", "method": "tools/call", "params": {"name": "serverB_long_task"}}
+    await server._handle_message(json.dumps(call_req))
+
+    # 2. キャンセル通知の送信 (AIから)
+    cancel_req = {"jsonrpc": "2.0", "method": "notifications/cancelled", "params": {"requestId": "cancel-123"}}
+    await server._handle_message(json.dumps(cancel_req))
+
+    # 検証: 1回目の呼び出しと2回目のキャンセル通知、計2回転送されていること
+    assert mock_backend_client.forward_request.call_count == 2
+    route, payload = mock_backend_client.forward_request.call_args_list[1][0]
+    
+    assert route == "/mcp/serverB"
+    assert payload["method"] == "notifications/cancelled"
+    assert payload["params"]["requestId"] == "cancel-123"

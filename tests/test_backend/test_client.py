@@ -16,8 +16,10 @@ async def test_forward_request_is_fire_and_forget():
     # SSEの接続待機をモック化（すぐにダミーURLを返すようにする）
     client.ensure_connected = AsyncMock(return_value="http://localhost:8000/mcp/serverA/message")
     
-    # httpx.AsyncClient の post メソッドをモック化
-    client.client.post = AsyncMock()
+    # httpx.AsyncClient の post メソッドをモック化 (Warning解消のため、raise_for_statusを持つ通常のMockを返す)
+    mock_res = MagicMock()
+    mock_res.raise_for_status = MagicMock()
+    client.client.post = AsyncMock(return_value=mock_res)
     
     # 転送するダミーのリクエスト
     req_payload = {"jsonrpc": "2.0", "id": "test-id-1", "method": "tools/call", "params": {"name": "read_file"}}

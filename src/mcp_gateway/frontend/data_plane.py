@@ -18,9 +18,13 @@ class DataPlaneServer:
         self.registry = registry
         self.backend_client = backend_client 
         self._running = False
-        # リクエストIDと送信元ルートの対応表（Sampling応答用）
-        # メモリリーク対策としてOrderedDictを使用し、LRUキャッシュ的に管理
+        
+        # リクエストIDと送信元ルートの対応表（Sampling等の逆方向応答用）
         self._response_routes: OrderedDict[str, Dict[str, Any]] = OrderedDict()
+        
+        # LLMからのリクエストIDと送信先ルートの対応表（キャンセル通知用）
+        self._request_routes: OrderedDict[str, Dict[str, Any]] = OrderedDict()
+        
         self.MAX_ROUTES = 1000
         self.ROUTE_TIMEOUT = 300 # 5分 (300秒)
         
@@ -119,6 +123,9 @@ class DataPlaneServer:
             elif method == "tools/call":
                 await self._forward_to_backend(req)
                 
+            elif method == "notifications/cancelled":
+                await self._forward_cancellation_to_backend(req)
+                
             elif req_id is not None:
                 await self._send_error(req_id, -32601, f"Method not found: {method}")
 
@@ -153,12 +160,43 @@ class DataPlaneServer:
         req["params"]["name"] = routing_info.get("backend_tool_name", tool_name)
         target_route = routing_info["target_route"]
 
+        # リクエストIDとルーティング先の対応を記憶 (キャンセル通知用)
+        req_id = req.get("id")
+        if req_id is not None:
+            req_id_str = str(req_id)
+            current_time = time.time()
+            
+            while self._request_routes:
+                oldest_id, info = next(iter(self._request_routes.items()))
+                if current_time - info["timestamp"] > self.ROUTE_TIMEOUT:
+                    self._request_routes.popitem(last=False)
+                else:
+                    break
+            
+            self._request_routes[req_id_str] = {"route": target_route, "timestamp": current_time}
+            self._request_routes.move_to_end(req_id_str)
+            
+            while len(self._request_routes) > self.MAX_ROUTES:
+                self._request_routes.popitem(last=False)
+
         if self.backend_client:
             logger.info(f"Forwarding pure payload for '{tool_name}' (as '{req['params']['name']}') to {target_route}")
             await self.backend_client.forward_request(target_route, req)
         else:
             logger.warning("Backend client not configured. Dropping request.")
             await self._send_error(req.get("id"), -32000, "Backend client not configured")
+
+    async def _forward_cancellation_to_backend(self, req: Dict[str, Any]):
+        """AIからのキャンセル通知を、要求を出したバックエンドへ転送する"""
+        cancel_id = str(req.get("params", {}).get("requestId"))
+        route_info = self._request_routes.get(cancel_id)
+        
+        if route_info and self.backend_client:
+            target_route = route_info["route"]
+            logger.info(f"Forwarding cancellation for request ID {cancel_id} to {target_route}")
+            await self.backend_client.forward_request(target_route, req)
+        else:
+            logger.warning(f"No routing info found for cancellation request ID: {cancel_id}")
 
     async def _forward_response_to_backend(self, res: Dict[str, Any]):
         """AIからの応答を、要求を出した元のバックエンドへ送り返す"""
