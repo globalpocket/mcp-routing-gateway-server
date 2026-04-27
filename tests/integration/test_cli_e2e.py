@@ -17,7 +17,8 @@ async def setup_gateway():
     client = BackendClient(base_url="http://127.0.0.1:8000")
     server = DataPlaneServer(registry=reg, backend_client=client)
     
-    # スタブサーバーのツールを登録
+    # 製品コード(cli.py)からハードコードされたモックを削除したため、
+    # E2Eテスト環境としてここで明示的にスタブサーバーのツールを登録する
     reg.add_backend_server("server_mock", [
         {"name": "read_file", "description": "Read info", "inputSchema": {}}
     ])
@@ -32,7 +33,7 @@ async def test_mcp_initialize(setup_gateway, capsys):
     await server._handle_message(req)
     
     captured = capsys.readouterr()
-    assert '"name": "mcp-gateway-server"' in captured.out
+    assert '"name": "mcp-routing-gateway"' in captured.out
     assert '"protocolVersion"' in captured.out
 
 @pytest.mark.anyio

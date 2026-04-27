@@ -3,6 +3,7 @@ import argparse
 import asyncio
 import logging
 import uvicorn
+import os
 from mcp_gateway.core.registry import ToolRegistry
 from mcp_gateway.backend.client import BackendClient
 from mcp_gateway.frontend.data_plane import DataPlaneServer
@@ -38,24 +39,11 @@ def main():
     
     # 1. Registryの初期化と設定読み込み
     registry = ToolRegistry(args.config)
+    logger.info("Registry initialized. Waiting for dynamic tool registrations via Control Plane.")
     
-    # ※バックエンド実装前のため、動作確認用の一時的なモックデータを登録します
-    mock_backend_tools = {
-        "serverA": [
-            {"name": "read_file", "description": "Read file from serverA", "inputSchema": {}},
-            {"name": "run_command", "description": "Raw command on serverA", "inputSchema": {}}
-        ],
-        "serverB": [
-            {"name": "search_github", "description": "Search Github on serverB", "inputSchema": {}}
-        ]
-    }
-    logger.info("Merging tools from backend servers (Mock)...")
-    # 従来の merge_and_resolve_tools の直接呼び出しから、動的追加メソッド経由に変更
-    registry.add_backend_server("serverA", mock_backend_tools["serverA"])
-    registry.add_backend_server("serverB", mock_backend_tools["serverB"])
-
-    # 2. Backend Client の初期化
-    backend_client = BackendClient(base_url="http://localhost:8000")
+    # 2. Backend Client の初期化 (環境変数から取得し、デフォルトをlocalhostにする)
+    backend_base_url = os.getenv("MCP_BACKEND_BASE_URL", "http://localhost:8000")
+    backend_client = BackendClient(base_url=backend_base_url)
 
     # 3. Data Plane と Control Plane サーバーの初期化
     data_plane = DataPlaneServer(registry=registry, backend_client=backend_client)
