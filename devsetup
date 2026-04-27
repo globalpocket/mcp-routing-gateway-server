@@ -8,4 +8,4 @@ source .venv/bin/activate
 pip install -e .
 
 # 3. テスト用のライブラリをインストール
-pip install pytest pytest-cov pytest-anyio httpx-sse
+pip install pytest pytest-cov pytest-anyio httpx-sse sse-starlette

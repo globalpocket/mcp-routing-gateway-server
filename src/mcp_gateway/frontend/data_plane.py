@@ -16,6 +16,27 @@ class DataPlaneServer:
         self.registry = registry
         self.backend_client = backend_client 
         self._running = False
+        # リクエストIDと送信元ルートの対応表（Sampling応答用）
+        self._response_routes: Dict[str, str] = {}
+        
+        # バックエンドからのメッセージをフックして監視する
+        if self.backend_client:
+            self.backend_client.message_callback = self._handle_backend_message
+
+    def _handle_backend_message(self, message: str, source_route: str):
+        """バックエンドからLLMへ送られるメッセージを監視し、IDを記録する"""
+        try:
+            data = json.loads(message)
+            req_id = data.get("id")
+            # method が存在する場合は「バックエンドからの要求」
+            if req_id is not None and "method" in data:
+                self._response_routes[str(req_id)] = source_route
+        except Exception:
+            pass
+        
+        # 本来の責務通り、LLMへ透過的に流す
+        sys.stdout.write(message + "\n")
+        sys.stdout.flush()
 
     async def start(self):
         """標準入力からのJSON-RPCリクエストを非同期で待ち受けるループ"""
@@ -48,14 +69,19 @@ class DataPlaneServer:
             method = req.get("method")
             params = req.get("params", {})
 
-            # 1. Gateway自身が応答すべきメソッド
+            # 1. AIからの「応答(レスポンス)」の場合、元のバックエンドへ送り返す
+            if req_id is not None and ("result" in req or "error" in req) and method is None:
+                await self._forward_response_to_backend(req)
+                return
+
+            # 2. Gateway自身が応答すべきメソッド
             if method == "initialize":
                 await self._send_response(req_id, self._handle_initialize())
             
             elif method == "tools/list":
                 await self._send_response(req_id, self._handle_tools_list())
             
-            # 2. バックエンドへバイパス(丸投げ)すべきメソッド
+            # 3. バックエンドへバイパス(丸投げ)すべきメソッド
             elif method == "tools/call":
                 await self._forward_to_backend(req)
                 
@@ -90,17 +116,26 @@ class DataPlaneServer:
             await self._send_error(req.get("id"), -32601, f"Tool not found: {tool_name}")
             return
 
-        # ツール名をバックエンドが知っている本来の名前(ベース名)に上書き
         req["params"]["name"] = routing_info.get("backend_tool_name", tool_name)
         target_route = routing_info["target_route"]
 
         if self.backend_client:
-            # 完全に透過的なペイロード(req)として転送。応答はSSE側から非同期でstdoutに書き込まれる想定。
             logger.info(f"Forwarding pure payload for '{tool_name}' (as '{req['params']['name']}') to {target_route}")
             await self.backend_client.forward_request(target_route, req)
         else:
             logger.warning("Backend client not configured. Dropping request.")
             await self._send_error(req.get("id"), -32000, "Backend client not configured")
+
+    async def _forward_response_to_backend(self, res: Dict[str, Any]):
+        """AIからの応答を、要求を出した元のバックエンドへ送り返す"""
+        req_id = str(res.get("id"))
+        target_route = self._response_routes.pop(req_id, None) # メモリリーク防止のためポップ
+        
+        if target_route and self.backend_client:
+            logger.info(f"Forwarding AI response for ID {req_id} to {target_route}")
+            await self.backend_client.forward_request(target_route, res)
+        else:
+            logger.warning(f"No routing info found for response ID: {req_id}")
 
     async def _send_response(self, req_id: Any, result: Dict[str, Any]):
         if req_id is None: return

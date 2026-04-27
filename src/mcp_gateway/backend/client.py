@@ -13,14 +13,18 @@ class BackendClient:
     リバースプロキシ(Nginx, Traefik, Kong等)経由で背後のMCPサーバーと通信するマルチプレクサ。
     SSEストリームを常時接続し、バックエンドからのイベントを透過的に標準出力へ流す。
     """
-    def __init__(self, base_url: str = "http://localhost:8000", stdout_callback: Callable[[str], None] = None):
+    def __init__(self, base_url: str = "http://localhost:8000", message_callback: Callable[[str, str], None] = None, stdout_callback: Callable[[str], None] = None):
         self.base_url = base_url.rstrip("/")
-        # AIエージェントへ直接メッセージを届けるためのコールバック（デフォルトは sys.stdout）
-        self.stdout_callback = stdout_callback or self._default_stdout
         self.client = httpx.AsyncClient(timeout=None) # 常時接続のためタイムアウトなし
         self._streams: Dict[str, Dict[str, Any]] = {}
+        
+        # 既存テストや旧仕様(stdout_callbackのみ利用)との互換性を保つ
+        if stdout_callback and not message_callback:
+            self.message_callback = lambda msg, route: stdout_callback(msg)
+        else:
+            self.message_callback = message_callback or self._default_message_handler
 
-    def _default_stdout(self, message: str):
+    def _default_message_handler(self, message: str, route: str):
         sys.stdout.write(message + "\n")
         sys.stdout.flush()
 
@@ -41,8 +45,8 @@ class BackendClient:
                             logger.info(f"Received POST endpoint for {target_route}: {post_url}")
                         
                         elif event.event == "message":
-                            # ★最重要: バックエンドからのJSON-RPCメッセージを、一切手を加えずにAIへ横流し
-                            self.stdout_callback(event.data)
+                            # メッセージと送信元ルートをハンドラへ渡す
+                            self.message_callback(event.data, target_route)
                             
             except Exception as e:
                 logger.error(f"SSE stream disconnected for {target_route}: {e}")
@@ -68,8 +72,7 @@ class BackendClient:
         try:
             post_url = await self.ensure_connected(target_route)
             
-            # ★最重要: リクエストをPOSTで投げる(ファイア・アンド・フォーゲット)。
-            # レスポンス待機はせず、上記の _stream_task が受け取ってstdoutに流す。
+            # リクエストをPOSTで投げる(ファイア・アンド・フォーゲット)
             asyncio.create_task(self.client.post(post_url, json=req))
             
         except Exception as e:
@@ -79,13 +82,11 @@ class BackendClient:
                 "id": req.get("id"),
                 "error": {"code": -32000, "message": f"Gateway Forwarding Error: {e}"}
             })
-            self.stdout_callback(error_res)
+            self.message_callback(error_res, target_route)
 
     async def fetch_tools(self, target_route: str) -> List[Dict[str, Any]]:
         """
         (Control Plane用) バックエンドから tools/list を取得する。
-        これだけはAIへ横流しせず、Gateway自身がレスポンスを解釈して内部レジストリを作るため、
-        独立した一時的な接続を行う。
         """
         sse_url = f"{self.base_url}{target_route}/sse"
         req = {"jsonrpc": "2.0", "id": "internal-fetch", "method": "tools/list", "params": {}}
