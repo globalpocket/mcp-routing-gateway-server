@@ -9,16 +9,13 @@ from mcp_gateway.frontend.data_plane import DataPlaneServer
 @pytest.fixture
 async def setup_gateway():
     """テスト用のGateway環境をセットアップするフィクスチャ"""
-    # テストの独立性を保つため、設定ファイルを読み込むが
-    # explicit_routingによる警告を避けるため、空の設定をシミュレートするなどの工夫も可能
     reg = ToolRegistry("gateway_config.yaml")
     
-    # モックサーバー localhost:8000 に接続する設定
+    # conftest.py で立ち上がった本物のモックサーバー(8000番)へ接続
     client = BackendClient(base_url="http://127.0.0.1:8000")
     server = DataPlaneServer(registry=reg, backend_client=client)
     
-    # 製品コード(cli.py)からハードコードされたモックを削除したため、
-    # E2Eテスト環境としてここで明示的にスタブサーバーのツールを登録する
+    # cli.pyからモックを削除したため、テスト側で明示的に登録
     reg.add_backend_server("server_mock", [
         {"name": "read_file", "description": "Read info", "inputSchema": {}}
     ])
@@ -27,7 +24,7 @@ async def setup_gateway():
 @pytest.mark.anyio
 async def test_mcp_initialize(setup_gateway, capsys):
     """MCP初期化(initialize)が正しく応答されるか検証"""
-    server = setup_gateway  # フィクスチャは既に解決済みなのでawait不要
+    server = setup_gateway
     req = json.dumps({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}})
     
     await server._handle_message(req)
@@ -45,15 +42,12 @@ async def test_mcp_tools_list(setup_gateway, capsys):
     await server._handle_message(req)
     
     captured = capsys.readouterr()
-    # ベース名とプレフィックス付きの両方が含まれているか
     assert "read_file" in captured.out
     assert "server_mock_read_file" in captured.out
 
 @pytest.mark.anyio
 async def test_cli_stdio_to_sse_roundtrip(setup_gateway, capsys):
-    """
-    Data Plane -> Backend(Mock) -> Data Plane の全行程(tools/call)をテスト。
-    """
+    """Data Plane -> Backend(Mock) -> Data Plane の本物の全行程(tools/call)をテスト。"""
     server = setup_gateway
     test_input = json.dumps({
         "jsonrpc": "2.0",
@@ -65,10 +59,10 @@ async def test_cli_stdio_to_sse_roundtrip(setup_gateway, capsys):
         }
     })
     
-    # 転送実行
+    # 転送実行（バックグラウンドの mock_backend.py へ本物のPOSTリクエストが飛ぶ）
     await server._handle_message(test_input)
 
-    # SSE経由で結果が戻るのを待機 (Mockサーバーが起動している前提)
+    # 実際のネットワーク越しのSSE応答を待つ
     await asyncio.sleep(0.5) 
     
     captured = capsys.readouterr()
@@ -79,21 +73,13 @@ def test_cli_initialization_flow():
     """src/mcp_gateway/cli.py の起動初期化ロジックのカバレッジを稼ぐ"""
     from mcp_gateway.cli import main
     
-    # asyncio.runをモックして製品の無限ループ起動を回避
     with patch("argparse.ArgumentParser.parse_args") as mock_args:
         mock_args.return_value = MagicMock(config="gateway_config.yaml")
         
-        # 修正ポイント: 
-        # asyncio.runに渡されたコルーチン(main_loop)を明示的に閉じる side_effect を設定。
-        # これにより、RuntimeWarning（未待機警告）を物理的に解消しつつ、
-        # 起動シーケンスが最後まで呼ばれたことを検証できます。
         def close_coro_side_effect(coro):
             coro.close()
             return None
 
         with patch("asyncio.run", side_effect=close_coro_side_effect) as mock_run:
-            # main()を実行。初期化処理が走り、最後にasyncio.run(main_loop())が呼ばれる
             main()
-            
-            # asyncio.runが呼ばれたこと（＝起動準備が完了したこと）を確認
             mock_run.assert_called_once()
