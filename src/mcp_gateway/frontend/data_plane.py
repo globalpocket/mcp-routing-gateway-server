@@ -74,7 +74,7 @@ class DataPlaneServer:
         return {
             "protocolVersion": "2024-11-05",
             "capabilities": {"tools": {}},
-            "serverInfo": {"name": "mcp-gateway-server", "version": "0.1.0"}
+            "serverInfo": {"name": "mcp-routing-gateway", "version": "0.1.0"}
         }
 
     def _handle_tools_list(self) -> Dict[str, Any]:
