@@ -39,13 +39,30 @@ async def message_endpoint(request: Request):
     payload = await request.json()
     received_requests.append(payload)
     
-    # 透過性の証明として、受け取ったリクエストに対する応答をSSE側に詰め込む
-    # (実際のMCPサーバーのように振る舞う)
-    response = {
-        "jsonrpc": "2.0",
-        "id": payload.get("id"),
-        "result": {"content": [{"type": "text", "text": f"Echo: {payload['params']['name']}"}]}
-    }
+    # IDを持たない通知 (notifications/initialized など) には応答を返さない
+    if "id" not in payload:
+        return {"status": "accepted"}
+        
+    # initialize リクエストへのモック応答
+    if payload.get("method") == "initialize":
+        response = {
+            "jsonrpc": "2.0",
+            "id": payload.get("id"),
+            "result": {
+                "protocolVersion": "2024-11-05", 
+                "capabilities": {}, 
+                "serverInfo": {"name": "mock", "version": "1.0"}
+            }
+        }
+    else:
+        # 透過性の証明として、受け取ったリクエストに対する応答をSSE側に詰め込む
+        name = payload.get("params", {}).get("name", "unknown")
+        response = {
+            "jsonrpc": "2.0",
+            "id": payload.get("id"),
+            "result": {"content": [{"type": "text", "text": f"Echo: {name}"}]}
+        }
+        
     await outbound_queue.put(response)
     return {"status": "accepted"}
 

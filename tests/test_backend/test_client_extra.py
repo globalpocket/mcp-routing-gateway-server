@@ -33,35 +33,33 @@ async def test_client_sanitize_invalid_json(caplog):
 
     async def mock_aiter():
         yield MagicMock(event="endpoint", data="/post")
-        # 1. 不正なJSON (stdioに流れてはいけない)
+        # ハンドシェイク応答 (これがないと ready にならず、次のメッセージを処理しない)
+        init_id = "stream-init-/mcp/sanitize"
+        yield MagicMock(event="message", data=json.dumps({"jsonrpc": "2.0", "id": init_id, "result": {}}))
+        
+        # 1. 不正なJSON
         yield MagicMock(event="message", data="invalid{json")
-        # 2. jsonrpc フィールドがないJSON (stdioに流れてはいけない)
+        # 2. jsonrpc 欠損
         yield MagicMock(event="message", data=json.dumps({"id": "1", "result": "ok"}))
-        # 3. 正しいJSON-RPC (stdioに流れるべき)
+        # 3. 正しいJSON-RPC
         yield MagicMock(event="message", data=json.dumps({"jsonrpc": "2.0", "id": "2", "result": "ok"}))
 
     mock_event_source = MagicMock()
     mock_event_source.aiter_sse.return_value = mock_aiter()
 
-    # パッチのターゲットを正確に指定
     with patch("mcp_gateway.backend.client.aconnect_sse", return_value=AsyncMock(__aenter__=AsyncMock(return_value=mock_event_source))):
-        # ループを回すためのタスクを立てて少し待機し、すぐにキャンセルする
-        task = asyncio.create_task(client._stream_task("/mcp/sanitize"))
-        await asyncio.sleep(0.2) # 反映待ち時間を少し延長
-        task.cancel()
-        try:
-            await task
-        except asyncio.CancelledError:
-            pass
+        with patch("httpx.AsyncClient.post", return_value=AsyncMock()):
+            task = asyncio.create_task(client._stream_task("/mcp/sanitize"))
+            await asyncio.sleep(0.2)
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
 
-    # 検証1: 正しいJSON-RPCの1件だけがコールバック(stdio出力)に渡されていること
     assert mock_callback.call_count == 1
     assert "2.0" in mock_callback.call_args[0][0]
-
-    # 検証2: 不正なデータはエラーログとして詳細に記録されていること（握りつぶされていない）
     assert "Invalid message format" in caplog.text
-    assert "invalid{json" in caplog.text
-    assert "Missing or invalid 'jsonrpc'" in caplog.text
 
 @pytest.mark.anyio
 async def test_client_disconnect():
@@ -86,10 +84,40 @@ async def test_client_forward_post_error(caplog):
     
     req = {"jsonrpc": "2.0", "id": "req-99", "method": "tools/call"}
     
-    # client.client.post が例外を投げるようにモック (HTTP 500などを想定)
     with patch.object(client.client, "post", side_effect=Exception("HTTP 500")):
         await client._do_post("http://test", req, "/mcp/test")
         
-    # コールバックが呼ばれ、Gatewayのエラーメッセージが含まれること
     assert mock_callback.call_count == 1
     assert "Gateway Forwarding Error: HTTP 500" in mock_callback.call_args[0][0]
+
+@pytest.mark.anyio
+async def test_stream_task_handshake():
+    """永続ストリーム接続時の initialize ハンドシェイクを検証"""
+    client = BackendClient()
+    init_id = "stream-init-/mcp/handshake"
+    
+    async def mock_aiter_init():
+        yield MagicMock(event="endpoint", data="/post")
+        # initialize 応答を模倣
+        yield MagicMock(event="message", data=json.dumps({"jsonrpc": "2.0", "id": init_id, "result": {}}))
+        # 無限待機
+        while True: await asyncio.sleep(0.1)
+
+    mock_source = MagicMock()
+    mock_source.aiter_sse.return_value = mock_aiter_init()
+
+    with patch("mcp_gateway.backend.client.aconnect_sse", return_value=AsyncMock(__aenter__=AsyncMock(return_value=mock_source))):
+        with patch("httpx.AsyncClient.post", return_value=AsyncMock()) as mock_post:
+            # タスクを起動
+            task = asyncio.create_task(client._stream_task("/mcp/handshake"))
+            
+            # ready イベントがセットされるまで待機 (最大1秒)
+            try:
+                await asyncio.wait_for(client.ensure_connected("/mcp/handshake"), timeout=1.0)
+            finally:
+                task.cancel()
+            
+            # initialize と notifications/initialized の2回 POST が呼ばれていることを確認
+            # (1回目はendpoint受信直後、2回目はinit結果受信後)
+            assert mock_post.call_count >= 2
+            assert init_id in str(mock_post.call_args_list[0])

@@ -36,32 +36,62 @@ class BackendClient:
             
         sse_url = f"{self.base_url}{target_route}/sse"
         
+        # ハンドシェイク用の固定IDとメッセージ
+        init_id = f"stream-init-{target_route}"
+        init_req = {
+            "jsonrpc": "2.0",
+            "id": init_id,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": "2024-11-05",
+                "capabilities": {"sampling": {}},
+                "clientInfo": {"name": "mcp-routing-gateway", "version": "0.1.0"}
+            }
+        }
+        init_notif = {"jsonrpc": "2.0", "method": "notifications/initialized"}
+
         while True:
             try:
                 logger.info(f"Connecting to persistent SSE stream: {sse_url}")
                 async with aconnect_sse(self.client, "GET", sse_url) as event_source:
+                    post_url = None
+                    initialized = False
+
                     async for event in event_source.aiter_sse():
                         if event.event == "endpoint":
                             post_endpoint = event.data
                             post_url = f"{self.base_url}{post_endpoint}" if post_endpoint.startswith("/") else post_endpoint
                             self._streams[target_route]["post_url"] = post_url
-                            self._streams[target_route]["ready"].set()
-                            logger.info(f"Received POST endpoint for {target_route}: {post_url}")
+                            
+                            # 1. ハンドシェイク開始: initialize リクエストを送信
+                            logger.info(f"Starting handshake for {target_route} via {post_url}")
+                            await self.client.post(post_url, json=init_req)
                         
                         elif event.event == "message":
-                            # SSE受信データのサニタイズ: 正しいJSON-RPCか軽く検証
                             try:
                                 data = json.loads(event.data)
                                 if not isinstance(data, dict) or data.get("jsonrpc") != "2.0":
-                                    raise ValueError("Missing or invalid 'jsonrpc' field or not a dictionary")
-                                # 検証成功時のみコールバック（stdioへの出力）を実行
+                                    raise ValueError("Missing or invalid 'jsonrpc' field")
+                                
+                                # ハンドシェイク応答の待機
+                                if not initialized and data.get("id") == init_id:
+                                    logger.info(f"Received initialize response for {target_route}. Sending notification.")
+                                    # 2. 初期化完了通知を送信
+                                    await self.client.post(post_url, json=init_notif)
+                                    initialized = True
+                                    # 3. 準備完了。これで ensure_connected が先に進めるようになる
+                                    self._streams[target_route]["ready"].set()
+                                    continue
+
+                                # 通常メッセージの転送
                                 self.message_callback(event.data, target_route)
                             except Exception as e:
-                                # try-catchで握りつぶさず、エラーとしてロギングしてstdioへの流出を防ぐ
                                 logger.error(f"Invalid message format from backend {target_route}: {e} - Raw data: {event.data}")
                             
             except Exception as e:
                 logger.error(f"SSE stream disconnected for {target_route}: {e}")
+                # 再接続に備えて状態をリセット
+                self._streams[target_route]["ready"].clear()
             
             # 切断された場合は数秒待ってから再接続（回復力）
             await asyncio.sleep(3)
@@ -75,7 +105,7 @@ class BackendClient:
                 "task": asyncio.create_task(self._stream_task(target_route))
             }
         
-        # endpointイベントが来てPOST URLが判明するまで待機
+        # ハンドシェイクが完了して ready.set() されるまで待機
         await self._streams[target_route]["ready"].wait()
         return self._streams[target_route]["post_url"]
 
@@ -141,8 +171,6 @@ class BackendClient:
                         if event.event == "endpoint" and not post_url:
                             post_endpoint = event.data
                             post_url = f"{self.base_url}{post_endpoint}" if post_endpoint.startswith("/") else post_endpoint
-                            
-                            # 1. Initialize Handshake の開始
                             await temp_client.post(post_url, json=init_req)
                             
                         elif event.event == "message" and post_url:
@@ -150,12 +178,10 @@ class BackendClient:
                             msg_id = res.get("id")
                             
                             if msg_id == "internal-init":
-                                # 2. 初期化完了通知を送信し、続けて tools/list を要求
                                 await temp_client.post(post_url, json=init_notif)
                                 await temp_client.post(post_url, json=tools_req)
                                 
                             elif msg_id == "internal-fetch":
-                                # 3. ツール一覧を受信して完了
                                 return res.get("result", {}).get("tools", [])
                                 
             except Exception as e:
