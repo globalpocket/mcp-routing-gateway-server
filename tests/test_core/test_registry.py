@@ -57,7 +57,7 @@ def test_namespace_prefix_creation(registry):
     
     assert "serverA_read_file" in tool_names
     assert "serverB_read_file" in tool_names
-    # serverB_search_github はブロックされていないため存在する
+    # serverB_search_github はブロックリストにないので存在すべき
     assert "serverB_search_github" in tool_names
 
 def test_explicit_routing_override(registry):

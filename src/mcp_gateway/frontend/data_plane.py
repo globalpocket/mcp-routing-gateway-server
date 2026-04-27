@@ -35,8 +35,10 @@ class DataPlaneServer:
             req_id = data.get("id")
             # method が存在する場合は「バックエンドからの要求」
             if req_id is not None and "method" in data:
-                req_id_str = str(req_id)
                 current_time = time.time()
+                
+                # 複数サーバーでのID衝突を防ぐため、Gateway独自の一意なIDを生成
+                gateway_req_id = f"{source_route}::{req_id}"
                 
                 # 1. タイムアウトした古いエントリのクリーンアップ
                 while self._response_routes:
@@ -47,21 +49,26 @@ class DataPlaneServer:
                         break
                 
                 # 2. 新しいエントリの記録と末尾への移動 (LRU)
-                self._response_routes[req_id_str] = {
+                self._response_routes[gateway_req_id] = {
                     "route": source_route,
+                    "original_id": req_id, # 元のIDを保持しておく
                     "timestamp": current_time
                 }
-                self._response_routes.move_to_end(req_id_str)
+                self._response_routes.move_to_end(gateway_req_id)
                 
                 # 3. 上限サイズを超えたら最も古いもの(先頭)を削除
                 while len(self._response_routes) > self.MAX_ROUTES:
                     self._response_routes.popitem(last=False)
+
+                # LLMに渡すメッセージのIDを、衝突しない独自IDにすり替える
+                data["id"] = gateway_req_id
+                message = json.dumps(data)
                     
         except Exception:
-            # パースに失敗した場合は無視してstdioに流す
+            # パースに失敗した場合は無視してそのままstdioに流す
             pass
         
-        # 本来の責務通り、LLMへ透過的に流す
+        # LLMへ流す
         sys.stdout.write(message + "\n")
         sys.stdout.flush()
 
@@ -155,15 +162,20 @@ class DataPlaneServer:
 
     async def _forward_response_to_backend(self, res: Dict[str, Any]):
         """AIからの応答を、要求を出した元のバックエンドへ送り返す"""
-        req_id = str(res.get("id"))
-        route_info = self._response_routes.pop(req_id, None) # メモリリーク防止のためポップ
-        target_route = route_info["route"] if route_info else None
+        gateway_req_id = str(res.get("id"))
+        route_info = self._response_routes.pop(gateway_req_id, None) # メモリリーク防止のためポップ
         
-        if target_route and self.backend_client:
-            logger.info(f"Forwarding AI response for ID {req_id} to {target_route}")
+        if route_info and self.backend_client:
+            target_route = route_info["route"]
+            original_id = route_info["original_id"]
+            
+            # バックエンドが認識できる本来のIDに書き戻す
+            res["id"] = original_id
+            
+            logger.info(f"Forwarding AI response for ID {gateway_req_id} (original: {original_id}) to {target_route}")
             await self.backend_client.forward_request(target_route, res)
         else:
-            logger.warning(f"No routing info found for response ID: {req_id}")
+            logger.warning(f"No routing info found for response ID: {gateway_req_id}")
 
     async def _send_response(self, req_id: Any, result: Dict[str, Any]):
         if req_id is None: return
