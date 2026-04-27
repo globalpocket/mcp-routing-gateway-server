@@ -10,7 +10,7 @@ logger = logging.getLogger(__name__)
 
 class BackendClient:
     """
-    Kong(API Gateway)経由で背後のMCPサーバーと通信するマルチプレクサ。
+    リバースプロキシ(Nginx, Traefik, Kong等)経由で背後のMCPサーバーと通信するマルチプレクサ。
     SSEストリームを常時接続し、バックエンドからのイベントを透過的に標準出力へ流す。
     """
     def __init__(self, base_url: str = "http://localhost:8000", stdout_callback: Callable[[str], None] = None):
