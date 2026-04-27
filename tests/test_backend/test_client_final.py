@@ -17,7 +17,8 @@ async def test_fetch_tools_success():
     mock_source = MagicMock()
     mock_source.aiter_sse.return_value = mock_aiter_success()
 
-    with patch("httpx_sse.aconnect_sse", return_value=AsyncMock(__aenter__=AsyncMock(return_value=mock_source))):
+    # モックのターゲットをローカル名前空間 (mcp_gateway.backend.client) に正確に指定
+    with patch("mcp_gateway.backend.client.aconnect_sse", return_value=AsyncMock(__aenter__=AsyncMock(return_value=mock_source))):
         with patch("httpx.AsyncClient.post", return_value=AsyncMock()) as mock_post:
             tools = await client.fetch_tools("/success")
             assert tools == [{"name": "test_tool"}]
@@ -35,7 +36,7 @@ async def test_fetch_tools_error_branches():
     mock_source = MagicMock()
     mock_source.aiter_sse.return_value = mock_aiter_no_endpoint()
     
-    with patch("httpx_sse.aconnect_sse", return_value=AsyncMock(__aenter__=AsyncMock(return_value=mock_source))):
+    with patch("mcp_gateway.backend.client.aconnect_sse", return_value=AsyncMock(__aenter__=AsyncMock(return_value=mock_source))):
         assert await client.fetch_tools("/none") == []
 
     # 2. fetch中に例外が発生するケース (except Exception網羅)
@@ -48,7 +49,7 @@ async def test_fetch_tools_error_branches():
         yield MagicMock(event="message", data=json.dumps({"id": "wrong", "result": {}}))
     
     mock_source.aiter_sse.return_value = mock_aiter_wrong_id()
-    with patch("httpx_sse.aconnect_sse", return_value=AsyncMock(__aenter__=AsyncMock(return_value=mock_source))):
+    with patch("mcp_gateway.backend.client.aconnect_sse", return_value=AsyncMock(__aenter__=AsyncMock(return_value=mock_source))):
         with patch("httpx.AsyncClient.post", return_value=AsyncMock()):
             # タイムアウトまで待機させて Miss 行を踏ませる
             assert await client.fetch_tools("/wrong") == []

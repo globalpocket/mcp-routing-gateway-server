@@ -118,38 +118,29 @@ class BackendClient:
         async with httpx.AsyncClient(timeout=10.0) as temp_client:
             try:
                 async with aconnect_sse(temp_client, "GET", sse_url) as event_source:
-                    post_endpoint = None
+                    post_url = None
+                    
                     async for event in event_source.aiter_sse():
-                        if event.event == "endpoint":
+                        if event.event == "endpoint" and not post_url:
                             post_endpoint = event.data
-                            break
-                    
-                    if not post_endpoint: return []
-                        
-                    post_url = f"{self.base_url}{post_endpoint}" if post_endpoint.startswith("/") else post_endpoint
-                    
-                    # 1. Initialize Handshake
-                    await temp_client.post(post_url, json=init_req)
-                    initialized = False
-                    async for event in event_source.aiter_sse():
-                        if event.event == "message":
+                            post_url = f"{self.base_url}{post_endpoint}" if post_endpoint.startswith("/") else post_endpoint
+                            
+                            # 1. Initialize Handshake の開始
+                            await temp_client.post(post_url, json=init_req)
+                            
+                        elif event.event == "message" and post_url:
                             res = json.loads(event.data)
-                            if res.get("id") == "internal-init":
-                                initialized = True
-                                # 2. Send initialized notification
+                            msg_id = res.get("id")
+                            
+                            if msg_id == "internal-init":
+                                # 2. 初期化完了通知を送信し、続けて tools/list を要求
                                 await temp_client.post(post_url, json=init_notif)
-                                break
+                                await temp_client.post(post_url, json=tools_req)
                                 
-                    if not initialized:
-                        return []
-                    
-                    # 3. Fetch tools
-                    await temp_client.post(post_url, json=tools_req)
-                    async for event in event_source.aiter_sse():
-                        if event.event == "message":
-                            res = json.loads(event.data)
-                            if res.get("id") == "internal-fetch":
+                            elif msg_id == "internal-fetch":
+                                # 3. ツール一覧を受信して完了
                                 return res.get("result", {}).get("tools", [])
+                                
             except Exception as e:
                 logger.error(f"Failed to fetch tools from {target_route}: {e}")
         return []
