@@ -7,12 +7,10 @@ from mcp_gateway.backend.client import BackendClient
 async def test_client_receives_sse_message():
     """製品(client.py)を一切修正せず、正しい手順でメッセージ受信を検証する"""
     mock_callback = MagicMock()
-    # ターミナル1の mock_backend.py に接続
-    client = BackendClient(base_url="http://127.0.0.1:8000", stdout_callback=mock_callback)
+    # ターミナル1の mock_backend.py(8765番) に接続
+    client = BackendClient(base_url="http://127.0.0.1:8765", stdout_callback=mock_callback)
     
-    # 【正解】_stream_task を直接 create_task せず、ensure_connected を呼ぶ。
-    # これにより製品内部で「1.辞書の器作成」「2.タスク起動」が正しい順序で行われます。
-    # (KeyError は発生しなくなります)
+    # _stream_task を直接 create_task せず、ensure_connected を呼ぶ
     await client.ensure_connected("/mcp/server_mock")
     
     # スタブへリクエストを転送し、スタブからの message 受信を誘発

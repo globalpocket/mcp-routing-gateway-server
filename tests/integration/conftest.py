@@ -10,7 +10,7 @@ def run_mock_backend():
     結合テストセッションの開始時にモックサーバーをバックグラウンドで起動し、
     全テスト終了時に自動でシャットダウンする。
     """
-    print("\n[Setup] Starting mock_backend.py...")
+    print("\n[Setup] Starting mock_backend.py on port 8765...")
     
     # サーバーを別プロセスで起動
     process = subprocess.Popen(
@@ -24,9 +24,9 @@ def run_mock_backend():
     server_ready = False
     for _ in range(50):
         try:
-            # FastAPIのヘルスチェック (docsエンドポイントを利用)
+            # FastAPIのヘルスチェック (ポートを8765に変更)
             with httpx.Client() as client:
-                response = client.get("http://127.0.0.1:8000/docs", timeout=0.1)
+                response = client.get("http://127.0.0.1:8765/docs", timeout=0.1)
                 if response.status_code == 200:
                     server_ready = True
                     break
@@ -35,7 +35,9 @@ def run_mock_backend():
 
     if not server_ready:
         process.terminate()
-        raise RuntimeError("Mock server failed to start. Gateway will hang.")
+        # 起動に失敗した原因（エラー出力）を取得して表示する
+        stdout, stderr = process.communicate(timeout=2)
+        raise RuntimeError(f"Mock server failed to start.\n--- STDERR ---\n{stderr}")
 
     # ------ ここで integration フォルダ内の実際のテストが実行される ------
     yield 

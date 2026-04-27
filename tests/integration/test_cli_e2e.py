@@ -11,8 +11,8 @@ async def setup_gateway():
     """テスト用のGateway環境をセットアップするフィクスチャ"""
     reg = ToolRegistry("gateway_config.yaml")
     
-    # conftest.py で立ち上がった本物のモックサーバー(8000番)へ接続
-    client = BackendClient(base_url="http://127.0.0.1:8000")
+    # conftest.py で立ち上がった本物のモックサーバー(8765番)へ接続
+    client = BackendClient(base_url="http://127.0.0.1:8765")
     server = DataPlaneServer(registry=reg, backend_client=client)
     
     # cli.pyからモックを削除したため、テスト側で明示的に登録

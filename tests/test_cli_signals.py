@@ -9,9 +9,12 @@ def test_cli_fatal_error_exit():
     with patch("argparse.ArgumentParser.parse_args") as mock_args:
         mock_args.return_value = MagicMock(config="gateway_config.yaml")
         
-        # 40行目の初期化は通し、72行目の asyncio.run で例外を発生させる
-        # これにより cli.py の 75-77行目の例外ハンドラが確実に実行される
-        with patch("asyncio.run", side_effect=Exception("Fatal Error")):
+        # モックした asyncio.run に渡されたコルーチンを安全に閉じてから例外を発生させる
+        def mock_run_fatal(coro):
+            coro.close()
+            raise Exception("Fatal Error")
+            
+        with patch("asyncio.run", side_effect=mock_run_fatal):
             with pytest.raises(SystemExit) as e:
                 main()
             
@@ -23,8 +26,11 @@ def test_cli_keyboard_interrupt():
     with patch("argparse.ArgumentParser.parse_args") as mock_args:
         mock_args.return_value = MagicMock(config="gateway_config.yaml")
         
-        # asyncio.run が呼ばれた際に KeyboardInterrupt を発生させる
-        # cli.py 73-74行目のハンドラを通す
-        with patch("asyncio.run", side_effect=KeyboardInterrupt):
+        # モックした asyncio.run に渡されたコルーチンを安全に閉じてから例外を発生させる
+        def mock_run_kb(coro):
+            coro.close()
+            raise KeyboardInterrupt()
+            
+        with patch("asyncio.run", side_effect=mock_run_kb):
             # SystemExit が発生せず、関数が正常にリターンすることを検証
             main()
