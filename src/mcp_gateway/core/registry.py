@@ -1,4 +1,4 @@
-import yaml
+import json
 import logging
 from typing import Dict, List, Any, Optional
 
@@ -6,21 +6,21 @@ logger = logging.getLogger(__name__)
 
 class ToolRegistry:
     """
-    静的設定(YAML)の読み込みと、複数MCPサーバーからのツールマージ・競合解決を行う
+    静的設定(JSON)の読み込みと、複数MCPサーバーからのツールマージ・競合解決を行う
     """
     def __init__(self, config_path: str):
         self.config_path = config_path
-        self.config = self._load_yaml(config_path)
+        self.config = self._load_json(config_path)
         # 最終的にAIに提示し、ルーティングに使用するツールの辞書
         self.active_tools: Dict[str, Dict[str, Any]] = {}
         # 現在登録されている各バックエンドの生ツールリストを保持する状態マップ
         self._backend_tools_map: Dict[str, List[Dict[str, Any]]] = {}
 
-    def _load_yaml(self, path: str) -> Dict[str, Any]:
-        """YAMLファイルを読み込む。重複するキーはPyYAMLの仕様で自動的に後勝ちになる"""
+    def _load_json(self, path: str) -> Dict[str, Any]:
+        """JSONファイルを読み込む。重複するキーはJSONの仕様で自動的に後勝ちになる"""
         try:
             with open(path, 'r', encoding='utf-8') as f:
-                return yaml.safe_load(f) or {}
+                return json.load(f) or {}
         except Exception as e:
             logger.error(f"Failed to load config from {path}: {e}")
             return {}
@@ -41,11 +41,6 @@ class ToolRegistry:
     def merge_and_resolve_tools(self, backend_tools_map: Dict[str, List[Dict[str, Any]]]):
         """
         各バックエンドから取得したツールリストを結合し、競合を解決する。
-        backend_tools_map の例: 
-        {
-            "serverA": [{"name": "read_file", "description": "..."}, ...],
-            "serverB": [{"name": "read_file", "description": "..."}, ...]
-        }
         """
         resolved_tools = {}
 
@@ -60,7 +55,7 @@ class ToolRegistry:
                 namespaced_tool = raw_tool.copy()
                 namespaced_tool["name"] = namespaced_name
                 # AIには見せない内部ルーティング用メタデータ
-                namespaced_tool["_target_route"] = f"/mcp/{server_name}"
+                namespaced_tool["_target_server"] = server_name
                 namespaced_tool["_backend_tool_name"] = base_tool_name
                 resolved_tools[namespaced_name] = namespaced_tool
                 
@@ -87,7 +82,7 @@ class ToolRegistry:
         """バックエンドのツールをベース名で呼び出せるようにプロキシ化する"""
         proxy_tool = raw_tool.copy()
         proxy_tool["name"] = tool_name
-        proxy_tool["_target_route"] = f"/mcp/{target_server}"
+        proxy_tool["_target_server"] = target_server
         proxy_tool["_backend_tool_name"] = raw_tool["name"]
         return proxy_tool
 
@@ -110,7 +105,7 @@ class ToolRegistry:
                 "name": v_name,
                 "description": v_config.get("description", ""),
                 "inputSchema": v_config.get("inputSchema", {"type": "object", "properties": {}}),
-                "_target_route": v_config.get("target_route")
+                "_target_server": v_config.get("target_server")
             }
             final_tools[v_name] = virtual_tool
             logger.info(f"Registered virtual tool: {v_name}")
@@ -126,7 +121,7 @@ class ToolRegistry:
                 logger.info(f"Blocked tool removed: {tool_name}")
 
     def get_tools_for_llm(self) -> List[Dict[str, Any]]:
-        """Data Plane (stdio) が AIエージェントに返すためのクリーンなツールリストを生成"""
+        """Data Plane が AIエージェントに返すためのクリーンなツールリストを生成"""
         llm_tools = []
         for tool in self.active_tools.values():
             clean_tool = tool.copy()
@@ -136,11 +131,11 @@ class ToolRegistry:
         return llm_tools
 
     def get_tool_routing_info(self, tool_name: str) -> Optional[Dict[str, Any]]:
-        """Data Plane (stdio) がリクエストをルーティングする際に内部情報を取得する"""
+        """Data Plane がリクエストをルーティングする際に内部情報を取得する"""
         tool = self.active_tools.get(tool_name)
         if not tool:
             return None
         return {
-            "target_route": tool.get("_target_route"),
+            "target_server": tool.get("_target_server"),
             "backend_tool_name": tool.get("_backend_tool_name", tool_name)
         }

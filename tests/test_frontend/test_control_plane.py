@@ -15,12 +15,11 @@ def test_admin_sync_route_calls_registry():
 
     # 実行: /admin/routes/sync へのPOST
     response = client.post("/admin/routes/sync", json={
-        "server_name": "test_srv",
-        "target_route": "/mcp/test"
+        "target_server": "test_srv"
     })
 
     # 検証
     assert response.status_code == 200
-    mock_client.fetch_tools.assert_called_once_with("/mcp/test")
+    mock_client.fetch_tools.assert_called_once_with("test_srv")
     # API呼び出しによって、Registryのadd_backend_serverが正しく呼ばれたか
     mock_registry.add_backend_server.assert_called_once_with("test_srv", [{"name": "fetched_tool"}])

@@ -7,8 +7,7 @@ from mcp_gateway.backend.client import BackendClient
 logger = logging.getLogger(__name__)
 
 class SyncRequest(BaseModel):
-    server_name: str
-    target_route: str
+    target_server: str
 
 def create_admin_api(registry: ToolRegistry, backend_client: BackendClient) -> FastAPI:
     """Control Plane (管理用REST API) のFastAPIアプリケーションを生成する"""
@@ -19,22 +18,22 @@ def create_admin_api(registry: ToolRegistry, backend_client: BackendClient) -> F
         """バックエンドからツール一覧を取得し、Registryを動的に更新する"""
         try:
             # 1. バックエンドから最新のツール一覧を取得
-            tools = await backend_client.fetch_tools(req.target_route)
+            tools = await backend_client.fetch_tools(req.target_server)
             
             # 2. Registryを更新
-            registry.add_backend_server(req.server_name, tools)
+            registry.add_backend_server(req.target_server, tools)
             
-            return {"status": "success", "server_name": req.server_name, "tools_count": len(tools)}
+            return {"status": "success", "target_server": req.target_server, "tools_count": len(tools)}
         except Exception as e:
-            logger.error(f"Sync failed for {req.server_name}: {e}")
+            logger.error(f"Sync failed for {req.target_server}: {e}")
             raise HTTPException(status_code=500, detail=str(e))
 
-    @app.delete("/admin/routes/{server_name}")
-    async def remove_route(server_name: str):
+    @app.delete("/admin/routes/{target_server}")
+    async def remove_route(target_server: str):
         """指定されたサーバーをRegistryから削除する"""
-        registry.remove_backend_server(server_name)
-        # バックエンドへの接続タスクもクリーンアップする (リソースリーク対策)
-        backend_client.disconnect(f"/mcp/{server_name}")
-        return {"status": "success", "message": f"Server '{server_name}' removed"}
+        registry.remove_backend_server(target_server)
+        # バックエンドへの接続セッションもクリーンアップする
+        backend_client.disconnect(target_server)
+        return {"status": "success", "message": f"Server '{target_server}' removed"}
 
     return app

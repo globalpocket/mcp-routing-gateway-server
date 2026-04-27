@@ -13,7 +13,7 @@ def test_admin_remove_route():
     response = client.delete("/admin/routes/serverA")
     assert response.status_code == 200
     mock_registry.remove_backend_server.assert_called_with("serverA")
-    mock_backend.disconnect.assert_called_with("/mcp/serverA")
+    mock_backend.disconnect.assert_called_with("serverA")
 
 def test_admin_sync_route_failure():
     """バックエンドからのツール取得失敗時のエラー処理を網羅"""
@@ -23,6 +23,6 @@ def test_admin_sync_route_failure():
     app = create_admin_api(MagicMock(), mock_client)
     client = TestClient(app)
     
-    response = client.post("/admin/routes/sync", json={"server_name": "s", "target_route": "/r"})
+    response = client.post("/admin/routes/sync", json={"target_server": "serverA"})
     assert response.status_code == 500
     assert "Fetch Error" in response.json()["detail"]

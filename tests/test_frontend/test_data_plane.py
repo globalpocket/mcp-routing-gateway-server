@@ -1,82 +1,84 @@
 import pytest
-import json
 from unittest.mock import AsyncMock, MagicMock
+import mcp.types as types
 from mcp_gateway.frontend.data_plane import DataPlaneServer
 
 @pytest.mark.anyio
-async def test_forward_to_backend_preserves_payload():
-    """
-    Data Planeがリクエストをバックエンドに転送する際、
-    IDや引数(arguments)を一切破壊せず、nameだけを書き換えて横流し(バイパス)することを検証する。
-    """
-    # 1. Mock Registry の準備
+async def test_handle_list_tools_filters_correctly():
+    """Registryから取得したツールリストが、正しくMCP公式のToolオブジェクトに変換されるか検証"""
     mock_registry = MagicMock()
-    # "serverA_read_file" という呼び出しは "/mcp/serverA" の "read_file" に変換される設定
+    mock_registry.get_tools_for_llm.return_value = [
+        {
+            "name": "safe_tool", 
+            "description": "A safely wrapped tool", 
+            "inputSchema": {"type": "object", "properties": {"arg1": {"type": "string"}}}
+        }
+    ]
+
+    server = DataPlaneServer(registry=mock_registry)
+    
+    # ハンドラを直接呼び出してテスト
+    result = await server.handle_list_tools()
+    
+    assert len(result) == 1
+    assert isinstance(result[0], types.Tool)
+    assert result[0].name == "safe_tool"
+    assert result[0].description == "A safely wrapped tool"
+    assert "arg1" in result[0].inputSchema["properties"]
+
+@pytest.mark.anyio
+async def test_handle_call_tool_pass_through():
+    """AIからのツール呼び出しが、ペイロード(引数)を維持したままバックエンドへ転送されるか検証(Pure Proxyの証明)"""
+    mock_registry = MagicMock()
+    # serverA_read_file は、バックエンド serverA の read_file にルーティングされる設定
     mock_registry.get_tool_routing_info.return_value = {
-        "target_route": "/mcp/serverA",
+        "target_server": "serverA",
         "backend_tool_name": "read_file"
     }
 
-    # 2. Mock Backend Client の準備
     mock_backend_client = AsyncMock()
+    # バックエンドのモックが返すダミー結果
+    expected_result = [types.TextContent(type="text", text="File content")]
+    mock_backend_client.call_tool.return_value = expected_result
 
-    # 3. Server の初期化
     server = DataPlaneServer(registry=mock_registry, backend_client=mock_backend_client)
 
-    # 4. AIエージェントからのリクエストをシミュレート
-    # (IDが 'client-id-999'、未知のパラメータ 'extra_field' が含まれているとする)
-    incoming_request = {
-        "jsonrpc": "2.0",
-        "id": "client-id-999",
-        "method": "tools/call",
-        "params": {
-            "name": "serverA_read_file",
-            "arguments": {"path": "/etc/passwd"},
-            "extra_field": "should_be_preserved" # ペイロード干渉をしないなら維持されるべき
-        }
-    }
+    # 実行 (AIエージェントからの呼び出しをシミュレート)
+    arguments = {"path": "/etc/hosts", "extra_flag": True}
+    result = await server.handle_call_tool("serverA_read_file", arguments)
 
-    # 5. 転送処理を実行
-    await server._forward_to_backend(incoming_request)
-
-    # 6. バックエンドに正しく横流しされたかを検証
-    mock_backend_client.forward_request.assert_called_once()
+    # 検証: バックエンドクライアントの call_tool が正しい引数で呼び出されたか
+    mock_backend_client.call_tool.assert_called_once_with(
+        "serverA",      # target_server
+        "read_file",    # backend_tool_name (元の名前に翻訳されていること)
+        arguments       # ペイロードが一切改変されていないこと
+    )
     
-    # 呼び出された際の引数を取得
-    called_route, forwarded_req = mock_backend_client.forward_request.call_args[0]
-
-    # ルーティング先が正しいか
-    assert called_route == "/mcp/serverA"
-
-    # ★最重要: ペイロードが破壊されていないか（Pure Proxyの証明）
-    assert forwarded_req["id"] == "client-id-999", "ID must be preserved"
-    assert forwarded_req["params"]["name"] == "read_file", "Tool name must be translated to backend name"
-    assert forwarded_req["params"]["arguments"] == {"path": "/etc/passwd"}, "Arguments must be preserved"
-    assert forwarded_req["params"]["extra_field"] == "should_be_preserved", "Unknown fields must be preserved"
+    # 検証: バックエンドからの結果がそのまま返されているか
+    assert result == expected_result
 
 @pytest.mark.anyio
-async def test_forward_cancellation_to_backend():
-    """AIからの実行キャンセル通知が、正しいバックエンドへ転送されることを検証"""
+async def test_handle_call_tool_blocked_or_missing():
+    """ブロックされたツールや存在しないツールが呼ばれた場合、正しくエラー弾くか検証"""
+    mock_registry = MagicMock()
+    mock_registry.get_tool_routing_info.return_value = None # ツールが見つからない/ブロックされた状態
+
+    server = DataPlaneServer(registry=mock_registry, backend_client=AsyncMock())
+
+    with pytest.raises(ValueError, match="Tool not found or blocked by gateway: missing_tool"):
+        await server.handle_call_tool("missing_tool", {})
+
+@pytest.mark.anyio
+async def test_handle_call_tool_no_backend():
+    """バックエンドクライアントが未設定の場合のエラー処理を検証"""
     mock_registry = MagicMock()
     mock_registry.get_tool_routing_info.return_value = {
-        "target_route": "/mcp/serverB",
-        "backend_tool_name": "long_task"
+        "target_server": "serverA",
+        "backend_tool_name": "read_file"
     }
-    mock_backend_client = AsyncMock()
-    server = DataPlaneServer(registry=mock_registry, backend_client=mock_backend_client)
 
-    # 1. ツール呼び出し (GatewayがIDとルートの対応を記憶する)
-    call_req = {"jsonrpc": "2.0", "id": "cancel-123", "method": "tools/call", "params": {"name": "serverB_long_task"}}
-    await server._handle_message(json.dumps(call_req))
+    # バックエンドを None で初期化
+    server = DataPlaneServer(registry=mock_registry, backend_client=None)
 
-    # 2. キャンセル通知の送信 (AIから)
-    cancel_req = {"jsonrpc": "2.0", "method": "notifications/cancelled", "params": {"requestId": "cancel-123"}}
-    await server._handle_message(json.dumps(cancel_req))
-
-    # 検証: 1回目の呼び出しと2回目のキャンセル通知、計2回転送されていること
-    assert mock_backend_client.forward_request.call_count == 2
-    route, payload = mock_backend_client.forward_request.call_args_list[1][0]
-    
-    assert route == "/mcp/serverB"
-    assert payload["method"] == "notifications/cancelled"
-    assert payload["params"]["requestId"] == "cancel-123"
+    with pytest.raises(RuntimeError, match="Backend client is not configured"):
+        await server.handle_call_tool("serverA_read_file", {})

@@ -1,11 +1,12 @@
 #!/bin/bash
 
-# 1. 仮想環境の作成と有効化 (Mac/Linuxの場合)
+# 1. 仮想環境の作成と有効化
 python3 -m venv .venv
 source .venv/bin/activate
 
-# 2. アプリケーションの依存関係をインストール
+# 2. アプリケーションの依存関係をインストール (mcp SDK を含む)
 pip install -e .
 
-# 3. テスト用のライブラリをインストール
-pip install pytest pytest-cov pytest-anyio httpx-sse sse-starlette
+# 3. テスト用ライブラリのインストール
+# (SSE関連のライブラリは公式SDKに含まれるか、不要になったため削除)
+pip install pytest pytest-cov pytest-anyio

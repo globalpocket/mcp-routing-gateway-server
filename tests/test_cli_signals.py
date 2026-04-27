@@ -7,7 +7,8 @@ from mcp_gateway.cli import main
 def test_cli_fatal_error_exit():
     """Fatal error発生時に sys.exit(1) が呼ばれることを確認"""
     with patch("argparse.ArgumentParser.parse_args") as mock_args:
-        mock_args.return_value = MagicMock(config="gateway_config.yaml")
+        # JSON設定ファイルのデフォルト名に修正
+        mock_args.return_value = MagicMock(config="gateway_config.json", mcp_config="mcp_config.json")
         
         # モックした asyncio.run に渡されたコルーチンを安全に閉じてから例外を発生させる
         def mock_run_fatal(coro):
@@ -24,7 +25,7 @@ def test_cli_fatal_error_exit():
 def test_cli_keyboard_interrupt():
     """KeyboardInterrupt発生時に正常終了することを確認"""
     with patch("argparse.ArgumentParser.parse_args") as mock_args:
-        mock_args.return_value = MagicMock(config="gateway_config.yaml")
+        mock_args.return_value = MagicMock(config="gateway_config.json", mcp_config="mcp_config.json")
         
         # モックした asyncio.run に渡されたコルーチンを安全に閉じてから例外を発生させる
         def mock_run_kb(coro):

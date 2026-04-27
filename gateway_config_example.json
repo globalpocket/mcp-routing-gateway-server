@@ -1,0 +1,14 @@
+{
+  "version": "1.0",
+  "virtual_tools": {
+    "run_command": {
+      "description": "安全なサンドボックス内でシェルコマンドを実行します。",
+      "target_server": "sandbox_server"
+    }
+  },
+  "explicit_routing": {
+    "read_file": "server_mock",
+    "search_github": "github_mcp_server"
+  },
+  "blocked_tools": ["search_github", "server_mock_dangerous_tool"]
+}

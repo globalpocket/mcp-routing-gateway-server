@@ -1,13 +1,13 @@
 import pytest
 import tempfile
 import os
-import yaml
+import json
 from mcp_gateway.core.registry import ToolRegistry
 
 @pytest.fixture
 def registry():
-    with tempfile.NamedTemporaryFile(suffix=".yaml", mode='w', delete=False) as f:
-        yaml.dump({"version": "1.0"}, f)
+    with tempfile.NamedTemporaryFile(suffix=".json", mode='w', delete=False) as f:
+        json.dump({"version": "1.0"}, f)
         temp_path = f.name
     reg = ToolRegistry(temp_path)
     yield reg

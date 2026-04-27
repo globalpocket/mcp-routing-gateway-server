@@ -5,14 +5,9 @@ description = "A stateless MCP routing gateway that acts as a secure facade for 
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
-    "pydantic>=2.0.0",   # 仮想ツールのスキーマ定義と検証
-    "fastapi>=0.100.0",  # Control Plane (管理用REST API)
-    "uvicorn>=0.23.0",   # FastAPIのサーバー起動
-    "httpx>=0.25.0",     # Data Plane (バックエンドへの非同期HTTPリクエスト)
-    "httpx-sse>=0.3.0",  # バックエンドからのSSEストリーム受信
-    "pyyaml>=6.0",       # gateway_config.yaml の読み込み
+    "mcp>=1.1.0",        # MCP公式SDK (サーバーおよびクライアントのプロトコル処理を全委譲)
+    "pydantic>=2.0.0",   # 内部のJSONスキーマ検証用
 ]
 
 [project.scripts]
-# CLIから起動できるようにするためのエントリーポイント
 mcp-gateway = "mcp_gateway.cli:main"

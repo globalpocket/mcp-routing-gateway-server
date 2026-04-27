@@ -1,201 +1,105 @@
-import sys
 import json
-import asyncio
 import logging
-import httpx
-from httpx_sse import aconnect_sse
-from typing import Dict, Any, List, Callable
+from typing import Dict, Any, List
+from contextlib import AsyncExitStack
+import mcp.types as types
+from mcp.client.session import ClientSession
+from mcp.client.stdio import stdio_client, StdioServerParameters
 
 logger = logging.getLogger(__name__)
 
 class BackendClient:
     """
-    リバースプロキシ(Nginx, Traefik, Kong等)経由で背後のMCPサーバーと通信するマルチプレクサ。
-    SSEストリームを常時接続し、バックエンドからのイベントを透過的に標準出力へ流す。
+    mcp_config.json に定義された複数のバックエンドMCPサーバー(stdio起動)を
+    公式SDKを利用して一括管理・接続維持するクライアントマネージャー。
     """
-    def __init__(self, base_url: str = "http://localhost:8000", message_callback: Callable[[str, str], None] = None, stdout_callback: Callable[[str], None] = None):
-        self.base_url = base_url.rstrip("/")
-        self.client = httpx.AsyncClient(timeout=None) # 常時接続のためタイムアウトなし
-        self._streams: Dict[str, Dict[str, Any]] = {}
-        
-        # 既存テストや旧仕様(stdout_callbackのみ利用)との互換性を保つ
-        if stdout_callback and not message_callback:
-            self.message_callback = lambda msg, route: stdout_callback(msg)
-        else:
-            self.message_callback = message_callback or self._default_message_handler
+    def __init__(self, mcp_config_path: str = "mcp_config.json"):
+        self.mcp_config_path = mcp_config_path
+        self.sessions: Dict[str, ClientSession] = {}
+        self._exit_stack = AsyncExitStack()
 
-    def _default_message_handler(self, message: str, route: str):
-        sys.stdout.write(message + "\n")
-        sys.stdout.flush()
-
-    async def _stream_task(self, target_route: str):
-        """特定のバックエンドに対するSSE接続を維持し、受信したメッセージを横流しする"""
-        # 内部状態が未初期化の場合は初期化（堅牢性の向上とテスト対応）
-        if target_route not in self._streams:
-            self._streams[target_route] = {"ready": asyncio.Event(), "post_url": None, "task": asyncio.current_task()}
-            
-        sse_url = f"{self.base_url}{target_route}/sse"
-        
-        # ハンドシェイク用の固定IDとメッセージ
-        init_id = f"stream-init-{target_route}"
-        init_req = {
-            "jsonrpc": "2.0",
-            "id": init_id,
-            "method": "initialize",
-            "params": {
-                "protocolVersion": "2024-11-05",
-                "capabilities": {"sampling": {}},
-                "clientInfo": {"name": "mcp-routing-gateway", "version": "0.1.0"}
-            }
-        }
-        init_notif = {"jsonrpc": "2.0", "method": "notifications/initialized"}
-
-        while True:
-            try:
-                logger.info(f"Connecting to persistent SSE stream: {sse_url}")
-                async with aconnect_sse(self.client, "GET", sse_url) as event_source:
-                    post_url = None
-                    initialized = False
-
-                    async for event in event_source.aiter_sse():
-                        if event.event == "endpoint":
-                            post_endpoint = event.data
-                            post_url = f"{self.base_url}{post_endpoint}" if post_endpoint.startswith("/") else post_endpoint
-                            self._streams[target_route]["post_url"] = post_url
-                            
-                            # 1. ハンドシェイク開始: initialize リクエストを送信
-                            logger.info(f"Starting handshake for {target_route} via {post_url}")
-                            await self.client.post(post_url, json=init_req)
-                        
-                        elif event.event == "message":
-                            try:
-                                data = json.loads(event.data)
-                                if not isinstance(data, dict) or data.get("jsonrpc") != "2.0":
-                                    raise ValueError("Missing or invalid 'jsonrpc' field")
-                                
-                                # ハンドシェイク応答の待機
-                                if not initialized and data.get("id") == init_id:
-                                    logger.info(f"Received initialize response for {target_route}. Sending notification.")
-                                    # 2. 初期化完了通知を送信
-                                    await self.client.post(post_url, json=init_notif)
-                                    initialized = True
-                                    # 3. 準備完了。これで ensure_connected が先に進めるようになる
-                                    self._streams[target_route]["ready"].set()
-                                    continue
-
-                                # 通常メッセージの転送
-                                self.message_callback(event.data, target_route)
-                            except Exception as e:
-                                logger.error(f"Invalid message format from backend {target_route}: {e} - Raw data: {event.data}")
-                            
-            except Exception as e:
-                logger.error(f"SSE stream disconnected for {target_route}: {e}")
-                # 再接続に備えて状態をリセット
-                self._streams[target_route]["ready"].clear()
-            
-            # 切断された場合は数秒待ってから再接続（回復力）
-            await asyncio.sleep(3)
-
-    async def ensure_connected(self, target_route: str) -> str:
-        """対象ルートへのSSE接続が確立されているか確認し、POST先のURLを返す"""
-        if target_route not in self._streams:
-            self._streams[target_route] = {
-                "ready": asyncio.Event(),
-                "post_url": None,
-                "task": asyncio.create_task(self._stream_task(target_route))
-            }
-        
-        # ハンドシェイクが完了して ready.set() されるまで待機
-        await self._streams[target_route]["ready"].wait()
-        return self._streams[target_route]["post_url"]
-
-    async def _do_post(self, post_url: str, req: Dict[str, Any], target_route: str):
-        """実際にバックエンドへPOSTを行い、エラー時はAIへエラー応答を返す内部メソッド"""
+    async def start(self):
+        """設定ファイルを読み込み、定義されているすべてのサーバープロセスを起動・接続する"""
         try:
-            res = await self.client.post(post_url, json=req)
-            res.raise_for_status() # HTTP 4xx/5xx エラーを捕捉
+            with open(self.mcp_config_path, 'r', encoding='utf-8') as f:
+                config = json.load(f)
+        except FileNotFoundError:
+            logger.warning(f"Config file not found: {self.mcp_config_path}. Starting without backends.")
+            return
         except Exception as e:
-            logger.error(f"Failed to post request to {target_route}: {e}")
-            # JSON-RPC仕様: IDを持たない通知(Notification)にはエラー応答を返さない
-            if req.get("id") is not None:
-                error_res = json.dumps({
-                    "jsonrpc": "2.0",
-                    "id": req.get("id"),
-                    "error": {"code": -32000, "message": f"Gateway Forwarding Error: {e}"}
-                })
-                self.message_callback(error_res, target_route)
+            logger.error(f"Failed to load {self.mcp_config_path}: {e}")
+            return
 
-    async def forward_request(self, target_route: str, req: Dict[str, Any]):
-        """AIエージェントからのリクエストをバックエンドへバイパスする"""
+        servers = config.get("mcpServers", {})
+        for server_name, server_config in servers.items():
+            await self._connect_server(server_name, server_config)
+
+    async def _connect_server(self, server_name: str, config: Dict[str, Any]):
+        """個別のMCPサーバーをサブプロセスとして起動し、セッションを保持する"""
         try:
-            post_url = await self.ensure_connected(target_route)
+            command = config.get("command")
+            args = config.get("args", [])
+            env = config.get("env", None)
             
-            # リクエストをPOSTで投げる(ファイア・アンド・フォーゲットだが、内部エラーは捕捉する)
-            asyncio.create_task(self._do_post(post_url, req, target_route))
+            if not command:
+                logger.error(f"Server '{server_name}' is missing 'command' in config.")
+                return
+
+            server_params = StdioServerParameters(command=command, args=args, env=env)
             
+            # stdio パイプの確立 (AsyncExitStackでライフサイクルを自動管理)
+            stdio_transport = await self._exit_stack.enter_async_context(stdio_client(server_params))
+            read_stream, write_stream = stdio_transport
+            
+            # セッションの確立と初期化
+            session = await self._exit_stack.enter_async_context(ClientSession(read_stream, write_stream))
+            await session.initialize()
+            
+            self.sessions[server_name] = session
+            logger.info(f"Successfully connected to backend server: {server_name}")
         except Exception as e:
-            logger.error(f"Failed to forward request to {target_route}: {e}")
-            if req.get("id") is not None:
-                error_res = json.dumps({
-                    "jsonrpc": "2.0",
-                    "id": req.get("id"),
-                    "error": {"code": -32000, "message": f"Gateway Forwarding Error: {e}"}
-                })
-                self.message_callback(error_res, target_route)
+            logger.error(f"Failed to connect to backend server '{server_name}': {e}")
 
-    async def fetch_tools(self, target_route: str) -> List[Dict[str, Any]]:
-        """
-        (Control Plane用) バックエンドと初期化ハンドシェイクを行い、tools/list を取得する。
-        """
-        sse_url = f"{self.base_url}{target_route}/sse"
-        
-        init_req = {
-            "jsonrpc": "2.0",
-            "id": "internal-init",
-            "method": "initialize",
-            "params": {
-                "protocolVersion": "2024-11-05",
-                "capabilities": {},
-                "clientInfo": {"name": "mcp-routing-gateway", "version": "0.1.0"}
-            }
-        }
-        init_notif = {"jsonrpc": "2.0", "method": "notifications/initialized"}
-        tools_req = {"jsonrpc": "2.0", "id": "internal-fetch", "method": "tools/list", "params": {}}
-        
-        async with httpx.AsyncClient(timeout=10.0) as temp_client:
-            try:
-                async with aconnect_sse(temp_client, "GET", sse_url) as event_source:
-                    post_url = None
-                    
-                    async for event in event_source.aiter_sse():
-                        if event.event == "endpoint" and not post_url:
-                            post_endpoint = event.data
-                            post_url = f"{self.base_url}{post_endpoint}" if post_endpoint.startswith("/") else post_endpoint
-                            await temp_client.post(post_url, json=init_req)
-                            
-                        elif event.event == "message" and post_url:
-                            res = json.loads(event.data)
-                            msg_id = res.get("id")
-                            
-                            if msg_id == "internal-init":
-                                await temp_client.post(post_url, json=init_notif)
-                                await temp_client.post(post_url, json=tools_req)
-                                
-                            elif msg_id == "internal-fetch":
-                                return res.get("result", {}).get("tools", [])
-                                
-            except Exception as e:
-                logger.error(f"Failed to fetch tools from {target_route}: {e}")
-        return []
+    async def stop(self):
+        """すべてのバックエンドプロセスを安全に終了させる"""
+        await self._exit_stack.aclose()
+        self.sessions.clear()
+        logger.info("All backend connections closed.")
 
-    def disconnect(self, target_route: str):
-        """
-        (Control Plane用) 特定のバックエンドに対するSSE接続タスクをキャンセルし、
-        リソースリークを防ぐためのクリーンアップを行う。
-        """
-        if target_route in self._streams:
-            task = self._streams[target_route].get("task")
-            if task and not task.done():
-                task.cancel()
-            del self._streams[target_route]
-            logger.info(f"Disconnected SSE stream and cleaned up resources for {target_route}")
+    async def call_tool(self, target_server: str, tool_name: str, arguments: dict) -> list[types.TextContent | types.ImageContent | types.EmbeddedResource]:
+        """フロントエンド(Data Plane)からのツール呼び出し要求を、該当バックエンドへ中継する"""
+        session = self.sessions.get(target_server)
+        if not session:
+            raise ValueError(f"Backend server '{target_server}' is not connected or does not exist.")
+        
+        logger.info(f"Calling tool '{tool_name}' on backend '{target_server}'")
+        result = await session.call_tool(tool_name, arguments)
+        return result.content
+
+    async def fetch_tools(self, target_server: str) -> List[Dict[str, Any]]:
+        """(Control Plane / 同期用) バックエンドからツール一覧を取得する"""
+        session = self.sessions.get(target_server)
+        if not session:
+            logger.error(f"Backend server '{target_server}' is not connected.")
+            return []
+        
+        try:
+            tools_result = await session.list_tools()
+            # Registryが処理しやすい辞書のリスト形式に変換
+            return [
+                {
+                    "name": t.name,
+                    "description": t.description,
+                    "inputSchema": t.inputSchema
+                }
+                for t in tools_result.tools
+            ]
+        except Exception as e:
+            logger.error(f"Failed to fetch tools from '{target_server}': {e}")
+            return []
+
+    def disconnect(self, target_server: str):
+        """特定のバックエンドを切断する"""
+        if target_server in self.sessions:
+            del self.sessions[target_server]
+            logger.info(f"Disconnected server '{target_server}' from active sessions.")

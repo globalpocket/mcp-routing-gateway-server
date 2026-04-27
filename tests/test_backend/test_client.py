@@ -1,44 +1,103 @@
 import pytest
-import asyncio
-from unittest.mock import AsyncMock, patch, MagicMock
+import json
+import tempfile
+import os
+from unittest.mock import patch, AsyncMock, MagicMock
+import mcp.types as types
 from mcp_gateway.backend.client import BackendClient
 
+@pytest.fixture
+def dummy_mcp_config():
+    """テスト用の一時的な mcp_config.json を作成"""
+    config = {
+        "mcpServers": {
+            "test_server": {
+                "command": "echo",
+                "args": ["test"]
+            }
+        }
+    }
+    fd, path = tempfile.mkstemp(suffix=".json")
+    with os.fdopen(fd, 'w') as f:
+        json.dump(config, f)
+    yield path
+    os.remove(path)
+
 @pytest.mark.anyio
-async def test_forward_request_is_fire_and_forget():
-    """
-    forward_request がレスポンスを待たずに(ブロッキングせずに)
-    POSTリクエストをバックグラウンドタスクとして発火させているかを検証
-    """
-    # モック用の stdout コールバック
-    mock_stdout = MagicMock()
-    client = BackendClient(stdout_callback=mock_stdout)
+async def test_backend_client_start_and_connect(dummy_mcp_config):
+    """mcp_config.json を読み込み、公式SDK経由でサーバーに接続できるか検証"""
+    client = BackendClient(mcp_config_path=dummy_mcp_config)
     
-    # SSEの接続待機をモック化（すぐにダミーURLを返すようにする）
-    client.ensure_connected = AsyncMock(return_value="http://localhost:8000/mcp/serverA/message")
+    # 公式SDKの stdio_client と ClientSession をモック化
+    mock_stdio_context = AsyncMock()
+    mock_stdio_context.__aenter__.return_value = (AsyncMock(), AsyncMock())
     
-    # httpx.AsyncClient の post メソッドをモック化 (Warning解消のため、raise_for_statusを持つ通常のMockを返す)
-    mock_res = MagicMock()
-    mock_res.raise_for_status = MagicMock()
-    client.client.post = AsyncMock(return_value=mock_res)
+    mock_session = AsyncMock()
+    mock_session.initialize = AsyncMock()
+    mock_session_context = AsyncMock()
+    mock_session_context.__aenter__.return_value = mock_session
+
+    with patch("mcp_gateway.backend.client.stdio_client", return_value=mock_stdio_context):
+        with patch("mcp_gateway.backend.client.ClientSession", return_value=mock_session_context):
+            # 起動
+            await client.start()
+            
+            assert "test_server" in client.sessions
+            assert client.sessions["test_server"] == mock_session
+            mock_session.initialize.assert_called_once()
+            
+            # 終了処理 (AsyncExitStackの解放確認)
+            await client.stop()
+            assert len(client.sessions) == 0
+
+@pytest.mark.anyio
+async def test_backend_client_call_tool():
+    """バックエンドへのツール呼び出しが正常に中継され、結果が返るか検証"""
+    client = BackendClient()
+    mock_session = AsyncMock()
     
-    # 転送するダミーのリクエスト
-    req_payload = {"jsonrpc": "2.0", "id": "test-id-1", "method": "tools/call", "params": {"name": "read_file"}}
+    # 返り値のモックを作成
+    mock_result = MagicMock()
+    mock_result.content = [types.TextContent(type="text", text="success")]
+    mock_session.call_tool.return_value = mock_result
     
-    # 実行
-    await client.forward_request("/mcp/serverA", req_payload)
+    client.sessions["target1"] = mock_session
     
-    # POST処理は非同期(create_task)で発火するため、イベントループを少し回す
-    await asyncio.sleep(0.01)
+    result = await client.call_tool("target1", "my_tool", {"arg": "val"})
     
-    # 検証1: ensure_connected が正しいルートで呼ばれたか
-    client.ensure_connected.assert_called_once_with("/mcp/serverA")
+    assert result[0].text == "success"
+    mock_session.call_tool.assert_called_once_with("my_tool", {"arg": "val"})
+
+@pytest.mark.anyio
+async def test_backend_client_call_tool_not_found():
+    """未接続のサーバーへツール呼び出しを行った際のエラーハンドリングを検証"""
+    client = BackendClient()
+    with pytest.raises(ValueError, match="is not connected or does not exist"):
+        await client.call_tool("missing_server", "tool", {})
+
+@pytest.mark.anyio
+async def test_backend_client_fetch_tools():
+    """Registry同期用のツールリスト取得機能(fetch_tools)を検証"""
+    client = BackendClient()
+    mock_session = AsyncMock()
     
-    # 検証2: client.post が、変更されていないペイロード(req_payload)で実行されたか
-    client.client.post.assert_called_once_with(
-        "http://localhost:8000/mcp/serverA/message", 
-        json=req_payload
-    )
+    mock_tools_result = MagicMock()
+    mock_tool = MagicMock()
+    mock_tool.name = "test_tool"
+    mock_tool.description = "desc"
+    mock_tool.inputSchema = {"type": "object"}
+    mock_tools_result.tools = [mock_tool]
     
-    # 検証3: Gateway自身が勝手に標準出力(stdout)へ書き込みをしていないか
-    # (レスポンスは後からSSEで降ってきたものを _stream_task が書き込むべき)
-    mock_stdout.assert_not_called()
+    mock_session.list_tools.return_value = mock_tools_result
+    client.sessions["target2"] = mock_session
+    
+    tools = await client.fetch_tools("target2")
+    assert len(tools) == 1
+    assert tools[0]["name"] == "test_tool"
+    assert tools[0]["description"] == "desc"
+
+@pytest.mark.anyio
+async def test_backend_client_fetch_tools_error():
+    """エラーパスの検証"""
+    client = BackendClient()
+    assert await client.fetch_tools("missing") == []

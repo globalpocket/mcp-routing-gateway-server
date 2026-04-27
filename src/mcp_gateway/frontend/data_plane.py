@@ -1,230 +1,81 @@
-import sys
-import json
-import time
-import asyncio
 import logging
-from collections import OrderedDict
-from typing import Dict, Any, Optional
+from typing import Any
+import mcp.types as types
+from mcp.server import Server
+from mcp.server.models import InitializationOptions
+from mcp.server import NotificationOptions
 from mcp_gateway.core.registry import ToolRegistry
 
 logger = logging.getLogger(__name__)
 
 class DataPlaneServer:
     """
-    AIエージェントと標準入出力(stdio)経由でJSON-RPC通信を行うサーバー
-    (Pure Proxy としてペイロードを透過的にバイパスする)
+    AIエージェントと標準入出力(stdio)経由で通信を行うMCPフロントエンドサーバー。
+    MCP公式SDKを活用し、プロトコル管理を完全に隠蔽しつつ Pure Proxy として振る舞う。
     """
     def __init__(self, registry: ToolRegistry, backend_client: Any = None):
         self.registry = registry
-        self.backend_client = backend_client 
-        self._running = False
+        self.backend_client = backend_client
+        self.mcp_server = Server("mcp-routing-gateway")
         
-        # リクエストIDと送信元ルートの対応表（Sampling等の逆方向応答用）
-        self._response_routes: OrderedDict[str, Dict[str, Any]] = OrderedDict()
-        
-        # LLMからのリクエストIDと送信先ルートの対応表（キャンセル通知用）
-        self._request_routes: OrderedDict[str, Dict[str, Any]] = OrderedDict()
-        
-        self.MAX_ROUTES = 1000
-        self.ROUTE_TIMEOUT = 300 # 5分 (300秒)
-        
-        # バックエンドからのメッセージをフックして監視する
-        if self.backend_client:
-            self.backend_client.message_callback = self._handle_backend_message
+        # 公式SDKのルーターにハンドラを登録
+        self.mcp_server.list_tools()(self.handle_list_tools)
+        self.mcp_server.call_tool()(self.handle_call_tool)
 
-    def _handle_backend_message(self, message: str, source_route: str):
-        """バックエンドからLLMへ送られるメッセージを監視し、IDを記録する"""
-        try:
-            data = json.loads(message)
-            req_id = data.get("id")
-            # method が存在する場合は「バックエンドからの要求」
-            if req_id is not None and "method" in data:
-                current_time = time.time()
-                
-                # 複数サーバーでのID衝突を防ぐため、Gateway独自の一意なIDを生成
-                gateway_req_id = f"{source_route}::{req_id}"
-                
-                # 1. タイムアウトした古いエントリのクリーンアップ
-                while self._response_routes:
-                    oldest_id, info = next(iter(self._response_routes.items()))
-                    if current_time - info["timestamp"] > self.ROUTE_TIMEOUT:
-                        self._response_routes.popitem(last=False)
-                    else:
-                        break
-                
-                # 2. 新しいエントリの記録と末尾への移動 (LRU)
-                self._response_routes[gateway_req_id] = {
-                    "route": source_route,
-                    "original_id": req_id, # 元のIDを保持しておく
-                    "timestamp": current_time
-                }
-                self._response_routes.move_to_end(gateway_req_id)
-                
-                # 3. 上限サイズを超えたら最も古いもの(先頭)を削除
-                while len(self._response_routes) > self.MAX_ROUTES:
-                    self._response_routes.popitem(last=False)
+    async def handle_list_tools(self) -> list[types.Tool]:
+        """
+        AIからの tools/list 要求に対するハンドラ。
+        Registryでフィルタリング・仮想化された安全なツール一覧のみをAIに提示する。
+        """
+        tools_data = self.registry.get_tools_for_llm()
+        tools = []
+        for t in tools_data:
+            tools.append(
+                types.Tool(
+                    name=t["name"],
+                    description=t.get("description", ""),
+                    inputSchema=t.get("inputSchema", {"type": "object", "properties": {}})
+                )
+            )
+        return tools
 
-                # LLMに渡すメッセージのIDを、衝突しない独自IDにすり替える
-                data["id"] = gateway_req_id
-                message = json.dumps(data)
-                    
-        except Exception:
-            # パースに失敗した場合は無視してそのままstdioに流す
-            pass
-        
-        # LLMへ流す
-        sys.stdout.write(message + "\n")
-        sys.stdout.flush()
+    async def handle_call_tool(self, name: str, arguments: dict) -> list[types.TextContent | types.ImageContent | types.EmbeddedResource]:
+        """
+        AIからの tools/call 要求に対するハンドラ。
+        ペイロード(引数)には一切干渉せず、適切なバックエンドへパススルー(横流し)する。
+        """
+        routing_info = self.registry.get_tool_routing_info(name)
+        if not routing_info:
+            raise ValueError(f"Tool not found or blocked by gateway: {name}")
+
+        target_server = routing_info["target_server"]
+        backend_tool_name = routing_info["backend_tool_name"]
+
+        if not self.backend_client:
+            raise RuntimeError("Backend client is not configured.")
+
+        logger.info(f"Routing tool call '{name}' to server '{target_server}' as '{backend_tool_name}'")
+
+        # バックエンドクライアントへ処理を委譲し、結果をそのままAIへ返す
+        # (※ BackendClient 側も今後のタスクで公式SDKに刷新し、この call_tool インターフェースを実装します)
+        result = await self.backend_client.call_tool(target_server, backend_tool_name, arguments)
+        return result
 
     async def start(self):
-        """標準入力からのJSON-RPCリクエストを非同期で待ち受けるループ"""
-        self._running = True
+        """標準入出力ストリームを用いてMCPサーバーを起動する"""
+        from mcp.server.stdio import stdio_server
+        
         logger.info("Data Plane Server started. Listening on stdio...")
-        
-        loop = asyncio.get_running_loop()
-        reader = asyncio.StreamReader()
-        protocol = asyncio.StreamReaderProtocol(reader)
-        await loop.connect_read_pipe(lambda: protocol, sys.stdin)
-
-        while self._running:
-            try:
-                line = await reader.readline()
-                if not line:
-                    break # EOF
-                
-                await self._handle_message(line.decode('utf-8').strip())
-            except Exception as e:
-                logger.error(f"Error reading from stdin: {e}")
-
-    async def _handle_message(self, message: str):
-        """受信したJSON-RPCメッセージを解析してルーティングする"""
-        if not message:
-            return
-
-        try:
-            req = json.loads(message)
-            req_id = req.get("id")
-            method = req.get("method")
-            params = req.get("params", {})
-
-            # 1. AIからの「応答(レスポンス)」の場合、元のバックエンドへ送り返す
-            if req_id is not None and ("result" in req or "error" in req) and method is None:
-                await self._forward_response_to_backend(req)
-                return
-
-            # 2. Gateway自身が応答すべきメソッド
-            if method == "initialize":
-                await self._send_response(req_id, self._handle_initialize())
-            
-            elif method == "tools/list":
-                await self._send_response(req_id, self._handle_tools_list())
-            
-            # 3. バックエンドへバイパス(丸投げ)すべきメソッド
-            elif method == "tools/call":
-                await self._forward_to_backend(req)
-                
-            elif method == "notifications/cancelled":
-                await self._forward_cancellation_to_backend(req)
-                
-            elif method == "ping":
-                await self._send_response(req_id, {})
-
-            elif req_id is not None:
-                await self._send_error(req_id, -32601, f"Method not found: {method}")
-
-        except json.JSONDecodeError:
-            await self._send_error(None, -32700, "Parse error")
-        except Exception as e:
-            logger.error(f"Internal error handling message: {e}")
-            # JSONのreq変数が存在しない可能性も考慮
-            error_id = req.get("id") if 'req' in locals() and isinstance(req, dict) else None
-            await self._send_error(error_id, -32603, f"Internal error: {str(e)}")
-
-    def _handle_initialize(self) -> Dict[str, Any]:
-        return {
-            "protocolVersion": "2024-11-05",
-            "capabilities": {"tools": {}},
-            "serverInfo": {"name": "mcp-routing-gateway", "version": "0.1.0"}
-        }
-
-    def _handle_tools_list(self) -> Dict[str, Any]:
-        tools = self.registry.get_tools_for_llm()
-        return {"tools": tools}
-
-    async def _forward_to_backend(self, req: Dict[str, Any]):
-        """ペイロードのIDや引数を維持したまま、ツール名のみ書き換えてバックエンドへ転送する"""
-        tool_name = req.get("params", {}).get("name")
-        routing_info = self.registry.get_tool_routing_info(tool_name)
-        
-        if not routing_info:
-            await self._send_error(req.get("id"), -32601, f"Tool not found: {tool_name}")
-            return
-
-        req["params"]["name"] = routing_info.get("backend_tool_name", tool_name)
-        target_route = routing_info["target_route"]
-
-        # リクエストIDとルーティング先の対応を記憶 (キャンセル通知用)
-        req_id = req.get("id")
-        if req_id is not None:
-            req_id_str = str(req_id)
-            current_time = time.time()
-            
-            while self._request_routes:
-                oldest_id, info = next(iter(self._request_routes.items()))
-                if current_time - info["timestamp"] > self.ROUTE_TIMEOUT:
-                    self._request_routes.popitem(last=False)
-                else:
-                    break
-            
-            self._request_routes[req_id_str] = {"route": target_route, "timestamp": current_time}
-            self._request_routes.move_to_end(req_id_str)
-            
-            while len(self._request_routes) > self.MAX_ROUTES:
-                self._request_routes.popitem(last=False)
-
-        if self.backend_client:
-            logger.info(f"Forwarding pure payload for '{tool_name}' (as '{req['params']['name']}') to {target_route}")
-            await self.backend_client.forward_request(target_route, req)
-        else:
-            logger.warning("Backend client not configured. Dropping request.")
-            await self._send_error(req.get("id"), -32000, "Backend client not configured")
-
-    async def _forward_cancellation_to_backend(self, req: Dict[str, Any]):
-        """AIからのキャンセル通知を、要求を出したバックエンドへ転送する"""
-        cancel_id = str(req.get("params", {}).get("requestId"))
-        route_info = self._request_routes.get(cancel_id)
-        
-        if route_info and self.backend_client:
-            target_route = route_info["route"]
-            logger.info(f"Forwarding cancellation for request ID {cancel_id} to {target_route}")
-            await self.backend_client.forward_request(target_route, req)
-        else:
-            logger.warning(f"No routing info found for cancellation request ID: {cancel_id}")
-
-    async def _forward_response_to_backend(self, res: Dict[str, Any]):
-        """AIからの応答を、要求を出した元のバックエンドへ送り返す"""
-        gateway_req_id = str(res.get("id"))
-        route_info = self._response_routes.pop(gateway_req_id, None) # メモリリーク防止のためポップ
-        
-        if route_info and self.backend_client:
-            target_route = route_info["route"]
-            original_id = route_info["original_id"]
-            
-            # バックエンドが認識できる本来のIDに書き戻す
-            res["id"] = original_id
-            
-            logger.info(f"Forwarding AI response for ID {gateway_req_id} (original: {original_id}) to {target_route}")
-            await self.backend_client.forward_request(target_route, res)
-        else:
-            logger.warning(f"No routing info found for response ID: {gateway_req_id}")
-
-    async def _send_response(self, req_id: Any, result: Dict[str, Any]):
-        if req_id is None: return
-        response = {"jsonrpc": "2.0", "id": req_id, "result": result}
-        sys.stdout.write(json.dumps(response) + "\n")
-        sys.stdout.flush()
-
-    async def _send_error(self, req_id: Any, code: int, message: str):
-        response = {"jsonrpc": "2.0", "id": req_id, "error": {"code": code, "message": message}}
-        sys.stdout.write(json.dumps(response) + "\n")
-        sys.stdout.flush()
+        async with stdio_server() as (read_stream, write_stream):
+            await self.mcp_server.run(
+                read_stream,
+                write_stream,
+                InitializationOptions(
+                    server_name="mcp-routing-gateway",
+                    server_version="0.1.0",
+                    capabilities=self.mcp_server.get_capabilities(
+                        notification_options=NotificationOptions(),
+                        experimental_capabilities={},
+                    )
+                )
+            )

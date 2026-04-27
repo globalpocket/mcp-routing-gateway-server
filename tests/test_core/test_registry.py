@@ -1,6 +1,6 @@
 import pytest
 import tempfile
-import yaml
+import json
 import os
 from mcp_gateway.core.registry import ToolRegistry
 
@@ -10,7 +10,7 @@ TEST_CONFIG = {
     "virtual_tools": {
         "run_command": {
             "description": "Safe sandbox command execution",
-            "target_route": "/mcp/sandbox"
+            "target_server": "sandbox_server"
         }
     },
     "explicit_routing": {
@@ -36,10 +36,10 @@ MOCK_BACKEND_TOOLS = {
 
 @pytest.fixture
 def temp_config_file():
-    """テスト用の一時的なYAML設定ファイルを作成する"""
-    fd, path = tempfile.mkstemp(suffix=".yaml")
+    """テスト用の一時的なJSON設定ファイルを作成する"""
+    fd, path = tempfile.mkstemp(suffix=".json")
     with os.fdopen(fd, 'w') as f:
-        yaml.dump(TEST_CONFIG, f)
+        json.dump(TEST_CONFIG, f)
     yield path
     os.remove(path)
 
@@ -66,7 +66,7 @@ def test_explicit_routing_override(registry):
     routing_info = registry.get_tool_routing_info("read_file")
     
     assert routing_info is not None
-    assert routing_info["target_route"] == "/mcp/serverA"
+    assert routing_info["target_server"] == "serverA"
     
     # LLM向けリストでも、ベース名の read_file が存在することを確認
     llm_tools = registry.get_tools_for_llm()
@@ -79,8 +79,8 @@ def test_virtual_tool_replacement(registry):
     routing_info = registry.get_tool_routing_info("run_command")
     
     assert routing_info is not None
-    # ルーティング先が仮想ツールで定義した /mcp/sandbox になっているか
-    assert routing_info["target_route"] == "/mcp/sandbox"
+    # ルーティング先が仮想ツールで定義した sandbox_server になっているか
+    assert routing_info["target_server"] == "sandbox_server"
 
     llm_tools = registry.get_tools_for_llm()
     run_cmd = next(t for t in llm_tools if t["name"] == "run_command")
@@ -88,7 +88,7 @@ def test_virtual_tool_replacement(registry):
     assert run_cmd["description"] == "Safe sandbox command execution"
 
 def test_get_tools_for_llm_hides_metadata(registry):
-    """4. LLMに返すツールリストから内部メタデータ(_target_route等)が隠蔽されているか"""
+    """4. LLMに返すツールリストから内部メタデータ(_target_server等)が隠蔽されているか"""
     llm_tools = registry.get_tools_for_llm()
     
     for tool in llm_tools:
