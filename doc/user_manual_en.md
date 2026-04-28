@@ -52,11 +52,11 @@ Defines the group of MCP servers (stdio processes) that the Gateway launches and
 
 ### ② `gateway_config.json` (Routing & Filter Definition)
 
-Controls which tools are presented to the AI and how they are routed. The default file is a minimal `{ "version": "0.2.0" }`. The following is an **example** of how to define advanced rules:
+Controls which tools are presented to the AI and how they are routed. The default file is a minimal `{ "version": "0.2.1" }`. The following is an **example** of how to define advanced rules:
 
 ```json
 {
-  "version": "0.2.0",
+  "version": "0.2.1",
   "virtual_tools": {
     "safe_query": {
       "description": "Query the database in read-only mode.",

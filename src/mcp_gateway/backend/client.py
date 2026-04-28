@@ -1,3 +1,4 @@
+import os
 import json
 import logging
 from typing import Dict, Any, List
@@ -39,13 +40,19 @@ class BackendClient:
         try:
             command = config.get("command")
             args = config.get("args", [])
-            env = config.get("env", None)
+            custom_env = config.get("env", None)
             
             if not command:
                 logger.error(f"Server '{server_name}' is missing 'command' in config.")
                 return
 
-            server_params = StdioServerParameters(command=command, args=args, env=env)
+            # 環境変数のマージ (ホストのPATH等を保持しつつ、カスタム変数を追加する)
+            merged_env = None
+            if custom_env is not None:
+                merged_env = os.environ.copy()
+                merged_env.update(custom_env)
+
+            server_params = StdioServerParameters(command=command, args=args, env=merged_env)
             
             stdio_transport = await self._exit_stack.enter_async_context(stdio_client(server_params))
             read_stream, write_stream = stdio_transport

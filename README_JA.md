@@ -17,7 +17,7 @@ AI Agent (MCP Client) → | [MCP Server] Gateway [MCP Client] | → Backend MCP 
 ```
 
 1. **フロントエンド (MCP Server):** AIエージェントに対して「単一の安全なMCPサーバー」として振る舞い、標準入出力 (`stdio`) で接続を受け付けます。
-2. **バックエンド (MCP Client):** `mcp_config.json` を読み込み、そこに定義された複数のMCPサーバー（`stdio` 起動プロセスや `SSE` 接続）を自動で起動・管理します。
+2. **バックエンド (MCP Client):** `mcp_config.json` を読み込み、そこに定義された複数のMCPサーバー（`stdio` 起動プロセス）を自動で起動・管理します。
 
 ## 🎯 設計思想 (Design Philosophy)
 

@@ -17,7 +17,7 @@ AI Agent (MCP Client) → | [MCP Server] Gateway [MCP Client] | → Backend MCP 
 ```
 
 1. **Frontend (MCP Server):** Acts as a "single, secure MCP server" to the AI agent, accepting connections via standard input/output (`stdio`).
-2. **Backend (MCP Client):** Reads `mcp_config.json` and automatically launches and manages multiple MCP servers defined within it (whether they are `stdio` spawned processes or `SSE` connections).
+2. **Backend (MCP Client):** Reads `mcp_config.json` and automatically launches and manages multiple MCP servers defined within it (via `stdio` spawned processes).
 
 ## 🎯 Design Philosophy
 

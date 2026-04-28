@@ -1,5 +1,5 @@
 {
-  "version": "0.2.0",
+  "version": "0.2.1",
   "virtual_tools": {
     "run_command": {
       "description": "安全なサンドボックス内でシェルコマンドを実行します。",
