@@ -72,7 +72,7 @@ class DataPlaneServer:
                 write_stream,
                 InitializationOptions(
                     server_name="mcp-routing-gateway",
-                    server_version="0.1.0",
+                    server_version="0.2.0",
                     capabilities=self.mcp_server.get_capabilities(
                         notification_options=NotificationOptions(),
                         experimental_capabilities={},
