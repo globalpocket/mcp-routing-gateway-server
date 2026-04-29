@@ -1,6 +1,6 @@
 [project]
 name = "mcp-routing-gateway"
-version = "0.2.2"
+version = "0.2.3"
 description = "A stateless MCP routing gateway that acts as a secure facade for AI agents."
 readme = "README.md"
 requires-python = ">=3.10"
